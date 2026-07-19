@@ -1,0 +1,7 @@
+# Tapo C-series RTSP → browser HLS/WebRTC via go2rtc
+streams:
+  cam01: rtsp://camera_costal:password_costal@192.168.1.61:554/stream1
+
+api:
+  listen: ":1984"
+  origin: "*"
