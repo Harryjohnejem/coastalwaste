@@ -1,15 +1,16 @@
-# TidalWatch waste detector (Python · YOLO-World)
+# Waste detector (Python · YOLO-World)
 
-Open-vocabulary YOLO that matches **text embeddings** of waste classes
-(plastic bottle, fishing net, styrofoam, …) against the live go2rtc frame,
-then posts boxes to the Laravel API for the dashboard overlay + log.
+Open-vocabulary YOLO matches text embeddings of waste classes
+(plastic bottle, fishing net, styrofoam, …) against a live go2rtc JPEG frame,
+then posts boxes to the Laravel API for the dashboard overlay and detection log.
 
 ## Setup
 
-Install **Python 3.10+** from https://www.python.org/downloads/ (enable “Add to PATH”).
+Install **Python 3.10+**. Then:
 
 ```bash
 cd detector
+cp .env.example .env
 python -m venv .venv
 
 # Windows
@@ -21,17 +22,25 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-First run downloads `yolov8s-worldv2.pt` (~50MB+).
+First run loads `yolov8s-worldv2.pt` (not committed; Ultralytics downloads it).
+`DETECTOR_KEY` in `.env` must match `api/.env`.
 
-## Run (with go2rtc + API already up)
+## Run (gateway + API already up)
 
 ```bash
 python app.py
-# or: uvicorn app:app --host 127.0.0.1 --port 8090
 ```
 
-Health: http://127.0.0.1:8090/health
+Default listen: `http://127.0.0.1:8092` (`PORT` in `.env`).
+Health: `http://127.0.0.1:8092/health`
+Overlay: `http://127.0.0.1:8092/overlay`
 
-## Env
+## Train locally from Roboflow annotations
 
-See `.env` — `DETECTOR_KEY` must match `DETECTOR_KEY` in `api/.env`.
+After you annotate on Roboflow, set `ROBOFLOW_API_KEY` in `.env` and run:
+
+```bash
+python train_from_roboflow.py
+```
+
+That downloads datasets into `datasets/` (gitignored) and writes weights under `weights/trained/`. No Roboflow inference credits are used.

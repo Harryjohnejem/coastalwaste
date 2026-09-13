@@ -1,31 +1,31 @@
-# TidalWatch API
+# Coastal waste API (Laravel)
 
-Laravel REST API for the Coastal Waste Monitoring frontend.
+REST API for the React dashboard and the Python detector.
 
 ## Quick start
 
 ```bash
 cd api
-cp .env.example .env   # if needed
+cp .env.example .env
 php artisan key:generate
-touch database/database.sqlite   # if missing
 php artisan migrate --seed
 php artisan serve
 ```
 
+Default database in `.env.example` is MySQL (`coastal_waste_monitoring_reporting_db`).
 API base URL: `http://localhost:8000/api`
 
-## Demo login (Sanctum)
+Endpoint catalog: `docs/api/endpoints.md`. Tests: `php artisan test`.
 
-| Field | Value |
-|-------|--------|
-| Email | `operator@tidalwatch.test` |
-| Password | `password` |
+## Login (Sanctum)
+
+The seeded admin is created by `database/seeders/AdminUserSeeder.php`.
+Use that email/password with `POST /api/login`.
 
 ```bash
 curl -X POST http://localhost:8000/api/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"operator@tidalwatch.test","password":"password"}'
+  -d '{"email":"<seeded-admin-email>","password":"<seeded-password>"}'
 ```
 
 Use the returned `token` as `Authorization: Bearer <token>` on all other endpoints.
@@ -46,9 +46,13 @@ Use the returned `token` as `Authorization: Bearer <token>` on all other endpoin
 | `POST` | `/detections/live` | Ingest from Python detector (`X-Detector-Key`) |
 | `GET` | `/stats/today` | Dashboard stats |
 | `GET` | `/stats/composition?range=24h` | Waste composition |
+| `GET` | `/stats/trends` | Detection trends |
 | `GET` | `/settings` | System settings |
 | `PUT` | `/settings` | Save settings |
 | `POST` | `/reports` | File cleanup report |
+| `GET` | `/quotas` | Waste quotas |
+| `GET` | `/notifications` | Operator notifications |
+| `GET` | `/waste-catalog` | Categories + classifications |
 
 `POST /login` and `POST /detections/live` are public (detector uses `X-Detector-Key`). All other routes require `auth:sanctum`.
 
@@ -62,7 +66,7 @@ In `web/.env`:
 VITE_API_URL=http://localhost:8000/api
 ```
 
-Sign in at `/login` with the demo credentials above, or set `VITE_AUTH_REQUIRED=true` to enforce auth on the dashboard.
+Sign in at `/login` with the seeded admin (see `AdminUserSeeder`).
 
 ## CORS
 
@@ -70,7 +74,9 @@ Sign in at `/login` with the demo credentials above, or set `VITE_AUTH_REQUIRED=
 
 ## Database
 
-Default: SQLite (`database/database.sqlite`). Seeder loads cameras, detections, reports, and default settings matching the UI template.
+Configured for MySQL (`DB_DATABASE=coastal_waste_monitoring_reporting_db`).
+Seeders load the admin user, cameras, waste catalog, notifications, and quotas.
+Migrations and seeders stay in `database/` (Laravel), not at the repo root.
 
 ## Camera stream test
 

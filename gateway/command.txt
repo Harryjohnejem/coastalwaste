@@ -1,3 +1,0 @@
-taskkill //IM go2rtc.exe //F
-cd gateway
-./go2rtc.exe -config go2rtc.yaml

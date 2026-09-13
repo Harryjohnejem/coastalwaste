@@ -1,28 +1,43 @@
 # Tapo camera gateway (go2rtc)
 
-Browsers cannot play Tapo RTSP directly. This gateway restreams:
+Browsers cannot play Tapo RTSP directly. This service restreams:
 
-`rtsp://…@192.168.1.61:554/stream1` → `http://127.0.0.1:1984/api/stream.m3u8?src=cam01`
+`rtsp://USER:PASS@CAMERA_IP:554/stream1` → JPEG / WebRTC on `127.0.0.1:1990`
 
-For even lower latency later, switch the UI to go2rtc WebRTC
-(`http://127.0.0.1:1984/stream.html?src=cam01`) — typically under 1s.
+The detector reads `http://127.0.0.1:1990/api/frame.jpeg?src=cam01`.
+The dashboard plays the same `cam01` source over WebRTC.
+
+## Config
+
+```bash
+cd gateway
+cp go2rtc.yaml.example go2rtc.yaml
+```
+
+Put the real Tapo RTSP URL in `go2rtc.yaml` (that file is gitignored).
 
 ## Start
+
+Download `go2rtc.exe` from the [go2rtc releases](https://github.com/AlexxIT/go2rtc/releases) into this folder (do not commit the binary).
 
 ```bash
 cd gateway
 ./go2rtc.exe -config go2rtc.yaml
 ```
 
-Or with Docker Desktop running: `docker compose up -d`
+If an old process is still bound to the ports:
 
-## Tapo app requirements
+```bash
+taskkill //IM go2rtc.exe //F
+```
 
-1. Camera online on LAN (`192.168.1.61`)
-2. **Camera Settings → Advanced → Camera Account** — create RTSP username/password  
-   (these are not your Tapo cloud login)
-3. RTSP paths: `/stream1` (HD), `/stream2` (SD)
+Or with Docker Desktop: `docker compose up -d`
+(compose maps `1984` / `8554`; the yaml used on Windows listens on `1990` / `8560` / `8561`).
 
-## UI
+## Tapo app
 
-CAM-01 in the API uses the HLS URL above. Keep go2rtc running while using the dashboard.
+1. Camera online on the LAN
+2. **Camera Settings → Advanced → Camera Account** — RTSP username/password (not the Tapo cloud login)
+3. Paths: `/stream1` (HD), `/stream2` (SD)
+
+Keep go2rtc running while the dashboard and detector are in use.

@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+datasets/
+runs/
+weights/
+*.pt
+*.zip
+__pycache__/
+.venv/
