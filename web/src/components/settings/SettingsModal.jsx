@@ -1,10 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Modal from '../common/Modal';
 import Switch from '../common/Switch';
 import RangeField from '../common/RangeField';
 import ChipSet from '../common/ChipSet';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 import { useCameraStore } from '../../stores/useCameraStore';
+import { useAuthStore } from '../../stores/useAuthStore';
+import { createQuota, updateQuota } from '../../api/quotas';
+import AddWasteModal from '../detections/AddWasteModal';
 
 const CLASS_OPTIONS = [
   'Plastic bottles',
@@ -22,6 +26,8 @@ const TABS = [
   { id: 'detection', label: 'Detection', icon: 'det' },
   { id: 'alerts', label: 'Alerts & reports', icon: 'alert' },
   { id: 'system', label: 'Station & storage', icon: 'sys' },
+  { id: 'quota', label: 'Waste quota', icon: 'quota' },
+  { id: 'catalog', label: 'Waste catalog', icon: 'catalog' },
 ];
 
 function TabIcon({ name }) {
@@ -48,6 +54,23 @@ function TabIcon({ name }) {
       </svg>
     );
   }
+  if (name === 'quota') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <path d="M12 20V10" />
+        <path d="M18 20V4" />
+        <path d="M6 20v-4" />
+        <path d="M3 20h18" />
+      </svg>
+    );
+  }
+  if (name === 'catalog') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <path d="M4 7h16M4 12h16M4 17h10" />
+      </svg>
+    );
+  }
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
       <rect x="2" y="3" width="20" height="14" rx="2" />
@@ -56,24 +79,82 @@ function TabIcon({ name }) {
   );
 }
 
+const DEFAULT_QUOTA_FORM = {
+  id: null,
+  name: 'Daily coastal quota · Paco Beach',
+  quota_limit: 50,
+  period: 'daily',
+  cleanup_recommendation:
+    'Conduct cleanup within the next hour along Paco Beach, Barangay Gracia.',
+  is_active: true,
+};
+
 export default function SettingsModal({ onTestStream }) {
+  const navigate = useNavigate();
   const open = useSettingsStore((s) => s.settingsOpen);
   const closeSettings = useSettingsStore((s) => s.closeSettings);
   const settings = useSettingsStore((s) => s.settings);
   const saveSettings = useSettingsStore((s) => s.saveSettings);
+  const quotas = useSettingsStore((s) => s.quotas);
+  const fetchQuotas = useSettingsStore((s) => s.fetchQuotas);
+  const wasteCatalog = useSettingsStore((s) => s.wasteCatalog);
+  const fetchWasteCatalog = useSettingsStore((s) => s.fetchWasteCatalog);
+  const settingsTab = useSettingsStore((s) => s.settingsTab);
   const setStreamStatus = useCameraStore((s) => s.setStreamStatus);
+  const logout = useAuthStore((s) => s.logout);
 
   const [tab, setTab] = useState('camera');
   const [form, setForm] = useState(settings);
   const [testError, setTestError] = useState('');
+  const [quotaForm, setQuotaForm] = useState(DEFAULT_QUOTA_FORM);
+  const [quotaError, setQuotaError] = useState('');
+  const [quotaSaving, setQuotaSaving] = useState(false);
+  const [addKind, setAddKind] = useState(null);
+  const quotaHydrated = useRef(false);
+
+  const patchQuota = (key, value) => {
+    setQuotaForm((q) => ({ ...q, [key]: value }));
+  };
+
+  const handleLogout = () => {
+    closeSettings();
+    logout();
+    navigate('/login', { replace: true });
+  };
 
   useEffect(() => {
     if (open) {
       setForm(settings);
-      setTab('camera');
+      setTab(typeof settingsTab === 'string' ? settingsTab : 'camera');
       setTestError('');
+      setQuotaError('');
+      quotaHydrated.current = false;
+      fetchQuotas();
+      fetchWasteCatalog();
+    } else {
+      setAddKind(null);
     }
-  }, [open, settings]);
+  }, [open, settings, fetchQuotas, fetchWasteCatalog, settingsTab]);
+
+  useEffect(() => {
+    if (!open || quotaHydrated.current) return;
+    const q = quotas?.[0];
+    if (!q) return;
+    quotaHydrated.current = true;
+    setQuotaForm({
+      id: q.id,
+      name: q.name || DEFAULT_QUOTA_FORM.name,
+      quota_limit: q.quota_limit ?? 50,
+      period: q.period || 'daily',
+      cleanup_recommendation:
+        q.cleanup_recommendation || DEFAULT_QUOTA_FORM.cleanup_recommendation,
+      is_active: q.is_active !== false,
+      current_count: q.current_count,
+      remaining: q.remaining,
+      percent: q.percent,
+      status: q.status,
+    });
+  }, [open, quotas]);
 
   const patch = (section, key, value) => {
     setForm((f) => ({
@@ -93,8 +174,30 @@ export default function SettingsModal({ onTestStream }) {
     onTestStream?.(url, form.stream?.protocol);
   };
 
-  const handleSave = () => {
-    // TODO: POST config to your backend / persist to your store
+  const handleSave = async () => {
+    setQuotaError('');
+    setQuotaSaving(true);
+    try {
+      const payload = {
+        name: quotaForm.name,
+        quota_limit: Number(quotaForm.quota_limit) || 1,
+        period: quotaForm.period,
+        cleanup_recommendation: quotaForm.cleanup_recommendation,
+        is_active: quotaForm.is_active !== false,
+      };
+      if (quotaForm.id) {
+        await updateQuota(quotaForm.id, payload);
+      } else {
+        await createQuota(payload);
+      }
+      await fetchQuotas();
+    } catch (err) {
+      setQuotaError(err.response?.data?.message || err.message || 'Could not save waste quota.');
+      setTab('quota');
+      setQuotaSaving(false);
+      return;
+    }
+    setQuotaSaving(false);
     saveSettings(form);
   };
 
@@ -471,17 +574,154 @@ export default function SettingsModal({ onTestStream }) {
               </div>
             </div>
           )}
+
+          {tab === 'quota' && (
+            <div className="pane active">
+              <h4>Waste quota</h4>
+              <div className="hint" style={{ marginBottom: 14 }}>
+                Monitor accumulated detections against a configured limit. When the quota is reached,
+                the dashboard alerts the administrator with a cleanup recommendation.
+              </div>
+              {quotaForm.status && (
+                <div className={`quota-cfg-status is-${quotaForm.status}`}>
+                  <span>
+                    {quotaForm.current_count ?? 0} detected · {quotaForm.remaining ?? quotaForm.quota_limit} remaining
+                    {' '}({Math.min(100, quotaForm.percent || 0)}%)
+                  </span>
+                  <strong>
+                    {quotaForm.status === 'reached'
+                      ? 'Quota reached'
+                      : quotaForm.status === 'approaching'
+                        ? 'Approaching quota'
+                        : 'Within quota'}
+                  </strong>
+                </div>
+              )}
+              <div className="switch-row">
+                <div>
+                  <div className="sw-label">Enable waste quota</div>
+                  <div className="sw-sub">Compare detections to the limit and raise alerts</div>
+                </div>
+                <Switch
+                  checked={quotaForm.is_active !== false}
+                  onChange={(v) => patchQuota('is_active', v)}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="cfg-quota-name">Quota name</label>
+                <input
+                  type="text"
+                  id="cfg-quota-name"
+                  value={quotaForm.name}
+                  onChange={(e) => patchQuota('name', e.target.value)}
+                />
+              </div>
+              <div className="field-grid">
+                <div className="field">
+                  <label htmlFor="cfg-quota-limit">Quota limit</label>
+                  <input
+                    type="number"
+                    id="cfg-quota-limit"
+                    min="1"
+                    value={quotaForm.quota_limit}
+                    onChange={(e) => patchQuota('quota_limit', e.target.value)}
+                  />
+                  <div className="hint">Accumulated waste items in the selected period</div>
+                </div>
+                <div className="field">
+                  <label htmlFor="cfg-quota-period">Period</label>
+                  <select
+                    id="cfg-quota-period"
+                    value={quotaForm.period}
+                    onChange={(e) => patchQuota('period', e.target.value)}
+                  >
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                  </select>
+                </div>
+              </div>
+              <div className="field">
+                <label htmlFor="cfg-quota-rec">Cleanup recommendation</label>
+                <textarea
+                  id="cfg-quota-rec"
+                  rows={3}
+                  value={quotaForm.cleanup_recommendation}
+                  onChange={(e) => patchQuota('cleanup_recommendation', e.target.value)}
+                />
+                <div className="hint">Shown when the quota is reached. Does not schedule cleanup.</div>
+              </div>
+              {quotaError ? <div className="field-error">{quotaError}</div> : null}
+            </div>
+          )}
+
+          {tab === 'catalog' && (
+            <div className="pane active">
+              <h4>Waste categories &amp; classifications</h4>
+              <div className="hint" style={{ marginBottom: 14 }}>
+                These names appear in Waste Detections filters. Add a category first, then add
+                classifications under it.
+              </div>
+              <div className="catalog-actions">
+                <button className="test-btn" type="button" onClick={() => setAddKind('category')}>
+                  Add waste category
+                </button>
+                <button
+                  className="test-btn"
+                  type="button"
+                  onClick={() => setAddKind('classification')}
+                  disabled={wasteCatalog.length === 0}
+                >
+                  Add waste classification
+                </button>
+              </div>
+              {wasteCatalog.length === 0 ? (
+                <div className="catalog-empty">No saved categories yet. Add one to get started.</div>
+              ) : (
+                <ul className="catalog-list">
+                  {wasteCatalog.map((cat) => (
+                    <li key={cat.id} className="catalog-item">
+                      <strong>{cat.name}</strong>
+                      {cat.description ? <p>{cat.description}</p> : null}
+                      <div className="catalog-chips">
+                        {(cat.classifications || []).length === 0 ? (
+                          <span className="catalog-chip muted">No classifications</span>
+                        ) : (
+                          cat.classifications.map((row) => (
+                            <span key={row.id} className="catalog-chip">
+                              {row.name}
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
       <div className="modal-foot">
+        <div className="foot-left">
+          <button className="btn-danger" type="button" onClick={handleLogout}>
+            Log out
+          </button>
+        </div>
         <button className="btn-ghost" type="button" onClick={closeSettings}>
           Cancel
         </button>
-        <button className="btn-save" type="button" onClick={handleSave}>
-          Save configuration
+        <button className="btn-save" type="button" onClick={handleSave} disabled={quotaSaving}>
+          {quotaSaving ? 'Saving…' : 'Save configuration'}
         </button>
       </div>
+      <AddWasteModal
+        open={Boolean(addKind)}
+        kind={addKind || 'category'}
+        stacked
+        onClose={() => setAddKind(null)}
+      />
     </Modal>
   );
 }

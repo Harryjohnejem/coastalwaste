@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
 import { RTSP_GATEWAY_MESSAGE } from '../../constants';
 import { resolvePlayableUrl } from '../../lib/streamUrl';
+import { catchUpLive, go2rtcSrcFromUrl, playGo2rtcWebRtc } from '../../lib/go2rtcLive';
 
 function isMjpeg(url) {
   return /\.(jpg|jpeg|mjpg|mjpeg)|snapshot|mjpeg/i.test(url || '');
@@ -17,15 +18,11 @@ function isRtsp(url, protocol) {
 }
 
 /**
- * Plays camera streams:
+ * Plays camera streams into a real <video>/<img> so Record can use captureStream.
  * - go2rtc → MSE MP4 (via Vite /go2rtc proxy when local)
- * - MJPEG / snapshot → <img>
+ * - MJPEG → <img>
  * - .m3u8 → hls.js
- * - otherwise → native <video src>
- * - RTSP → NoSignal with gateway message
- *
- * Note: do not set crossOrigin on MSE — it breaks go2rtc progressive MP4.
- * Same-origin /go2rtc proxy is enough for canvas detection.
+ * - RTSP without gateway URL → standby
  */
 export default function StreamPlayer({
   url,
@@ -43,15 +40,19 @@ export default function StreamPlayer({
   const statusRef = useRef(onStatusChange);
   statusRef.current = onStatusChange;
 
+  const [failed, setFailed] = useState(false);
   const rtspBlocked = isRtsp(url, protocol);
-  const showNoSignal = !url || rtspBlocked;
+  const showNoSignal = !url || rtspBlocked || failed;
 
   useEffect(() => {
     const video = videoRef.current;
     const img = imgRef.current;
     let aborted = false;
     const report = (s) => {
-      if (!aborted) statusRef.current?.(s);
+      if (aborted) return;
+      if (s === 'LIVE') setFailed(false);
+      if (s === 'ERROR') setFailed(true);
+      statusRef.current?.(s);
     };
 
     const setMedia = (el) => {
@@ -71,6 +72,7 @@ export default function StreamPlayer({
         video.onplaying = null;
         video.onerror = null;
         video.pause?.();
+        video.srcObject = null;
         video.removeAttribute('src');
         video.load();
         video.style.display = 'none';
@@ -96,18 +98,63 @@ export default function StreamPlayer({
 
     const playUrl = resolvePlayableUrl(url) || url;
     report('CONNECTING…');
+    const t0 = performance.now();
+    let snapshotTimer;
+    let watchdog;
 
-    if (isMjpeg(playUrl) && img) {
-      img.src = playUrl;
+    const startSnapshot = (snapUrl) => {
+      if (!img) {
+        report('ERROR');
+        return;
+      }
+      clearInterval(snapshotTimer);
+      const tick = () => {
+        const sep = snapUrl.includes('?') ? '&' : '?';
+        img.src = `${snapUrl}${sep}t=${Date.now()}`;
+      };
       img.onload = () => {
         if (aborted) return;
         img.style.display = 'block';
+        if (video) video.style.display = 'none';
         setMedia(img);
+        onLatency?.(Math.round(performance.now() - t0));
         report('LIVE');
       };
-      img.onerror = () => report('ERROR');
+      img.onerror = () => {
+        if (aborted) return;
+        if (snapUrl === '/frame.jpeg') {
+          startSnapshot('/stream.mjpeg');
+          return;
+        }
+        report('ERROR');
+      };
+      if (/mjpeg/i.test(snapUrl)) {
+        img.src = snapUrl;
+        return;
+      }
+      tick();
+      snapshotTimer = setInterval(tick, 700);
+    };
+
+    if (isMjpeg(playUrl) && img) {
+      img.style.display = 'block';
+      img.src = playUrl;
+      img.onload = () => {
+        if (aborted) return;
+        setMedia(img);
+        onLatency?.(Math.round(performance.now() - t0));
+        report('LIVE');
+      };
+      img.onerror = () => {
+        if (aborted) return;
+        // Keep trying — first frames can 503 while the preview thread starts.
+        setTimeout(() => {
+          if (!aborted && img) img.src = `${playUrl.split('?')[0]}?t=${Date.now()}`;
+        }, 400);
+      };
       return () => {
         aborted = true;
+        clearInterval(snapshotTimer);
         resetMedia();
       };
     }
@@ -119,24 +166,79 @@ export default function StreamPlayer({
       };
     }
 
-    // go2rtc MSE progressive MP4
-    if (/\/api\/stream\.mp4/i.test(playUrl)) {
+    // go2rtc: WebRTC first (low delay), then MSE with live-edge catch-up
+    const go2src = go2rtcSrcFromUrl(playUrl);
+    if (go2src && /\/api\/stream\.mp4/i.test(playUrl)) {
+      let pc = null;
+      let catchUpTimer;
+      let usedMse = false;
       video.style.display = 'block';
-      video.src = playUrl;
       setMedia(video);
-      video.onplaying = () => report('LIVE');
-      video.onerror = () => {
-        if (aborted) return;
-        // Fall back to original URL via HLS if present
-        if (isHls(url)) {
-          playHls(url, video, report, hlsRef, () => aborted, setMedia);
-        } else {
-          report('ERROR');
-        }
+      video.preload = 'none';
+
+      const markLive = () => {
+        clearTimeout(watchdog);
+        onLatency?.(Math.round(performance.now() - t0));
+        report('LIVE');
       };
-      video.play().catch(() => {});
+
+      const startMse = () => {
+        if (aborted || !video || usedMse) return;
+        usedMse = true;
+        try {
+          pc?.close();
+        } catch {
+          /* ignore */
+        }
+        pc = null;
+        video.srcObject = null;
+        video.src = playUrl;
+        video.onplaying = () => {
+          markLive();
+          catchUpLive(video, 0.25);
+        };
+        video.onerror = () => {
+          if (aborted) return;
+          video.style.display = 'none';
+          startSnapshot('/frame.jpeg');
+        };
+        catchUpTimer = setInterval(() => catchUpLive(video, 0.25), 400);
+        video.play().catch(() => {
+          if (!aborted) startSnapshot('/frame.jpeg');
+        });
+      };
+
+      playGo2rtcWebRtc(video, go2src, { timeoutMs: 3500 })
+        .then((conn) => {
+          if (aborted) {
+            conn.close();
+            return;
+          }
+          pc = conn;
+          markLive();
+        })
+        .catch(() => {
+          if (!aborted) startMse();
+        });
+
+      watchdog = setTimeout(() => {
+        if (aborted) return;
+        const playing =
+          (video.srcObject && video.readyState >= 2) ||
+          (video.currentTime > 0 && !video.paused && video.readyState >= 2);
+        if (!playing) startMse();
+      }, 7000);
+
       return () => {
         aborted = true;
+        clearTimeout(watchdog);
+        clearInterval(snapshotTimer);
+        clearInterval(catchUpTimer);
+        try {
+          pc?.close();
+        } catch {
+          /* ignore */
+        }
         resetMedia();
       };
     }
@@ -152,7 +254,10 @@ export default function StreamPlayer({
     video.style.display = 'block';
     video.src = playUrl;
     setMedia(video);
-    video.onplaying = () => report('LIVE');
+    video.onplaying = () => {
+      onLatency?.(Math.round(performance.now() - t0));
+      report('LIVE');
+    };
     video.onerror = () => {
       if (aborted) return;
       video.style.display = 'none';
@@ -164,8 +269,7 @@ export default function StreamPlayer({
       aborted = true;
       resetMedia();
     };
-    // Only reconnect when the source changes — not on every parent re-render
-  }, [url, protocol, rtspBlocked, mediaRef]);
+  }, [url, protocol, rtspBlocked, mediaRef, onLatency]);
 
   const message = rtspBlocked
     ? RTSP_GATEWAY_MESSAGE
@@ -180,6 +284,7 @@ export default function StreamPlayer({
         autoPlay
         muted
         playsInline
+        preload="none"
       />
       <img ref={imgRef} className="stream-img" alt="Live camera stream" />
 
@@ -189,7 +294,13 @@ export default function StreamPlayer({
             <div className="sweep" />
           </div>
           <h2>Awaiting camera signal</h2>
-          <p>{message}</p>
+          <p>
+            {rtspBlocked
+              ? message
+              : failed
+                ? 'Tapo not reachable at 192.168.254.185 — connect this PC to the camera Wi-Fi, then keep go2rtc on port 1990.'
+                : message}
+          </p>
           {!rtspBlocked && (
             <button className="connect-cta" type="button" onClick={onConnectClick}>
               Connect stream

@@ -16,38 +16,44 @@ class StatsController extends Controller
         $today = Carbon::today();
         $yesterday = Carbon::yesterday();
 
-        $todayCount = Detection::query()->whereDate('detected_at', $today)->count();
-        $yesterdayCount = Detection::query()->whereDate('detected_at', $yesterday)->count();
+        $todayCount = (int) Detection::query()->whereDate('detected_at', $today)->sum('quantity');
+        $yesterdayCount = (int) Detection::query()->whereDate('detected_at', $yesterday)->sum('quantity');
 
         $detectionDelta = $this->percentDelta($todayCount, $yesterdayCount);
 
         $debrisKg = round($todayCount * 0.22, 1);
-        $reportsFiled = Report::query()->whereDate('created_at', $today)->count()
-            + Report::query()->whereDate('created_at', '<', $today)->count();
+        $reportsFiled = Report::query()->count();
 
-        $flaggedSectors = Detection::query()
+        $flaggedLocations = Detection::query()
             ->whereDate('detected_at', $today)
-            ->whereNotNull('sector')
-            ->select('sector')
+            ->whereNotNull('location')
+            ->select('location')
             ->distinct()
-            ->pluck('sector')
-            ->map(fn ($sector) => str_replace('Sector ', '', $sector))
+            ->pluck('location')
             ->filter()
             ->values();
 
-        $hotspotLabels = $flaggedSectors->isNotEmpty()
-            ? $flaggedSectors->join(', ').' flagged'
+        $hotspotLabels = $flaggedLocations->isNotEmpty()
+            ? $flaggedLocations->join(', ').' flagged'
             : 'None flagged';
+
+        $monthCount = (int) Detection::query()
+            ->whereYear('detected_at', $today->year)
+            ->whereMonth('detected_at', $today->month)
+            ->sum('quantity');
+        $totalCount = (int) Detection::query()->sum('quantity');
 
         return response()->json([
             'detections' => $todayCount,
+            'month_detections' => $monthCount,
+            'total_detections' => $totalCount,
             'debris_kg' => $debrisKg,
             'hotspots' => [
-                'flagged' => $flaggedSectors->count(),
+                'flagged' => $flaggedLocations->count(),
                 'total' => 6,
                 'labels' => $hotspotLabels,
             ],
-            'reports_filed' => max($reportsFiled, Report::query()->count()),
+            'reports_filed' => $reportsFiled,
             'deltas' => [
                 'detections' => [
                     'direction' => $detectionDelta >= 0 ? 'up' : 'down',
@@ -75,54 +81,102 @@ class StatsController extends Controller
         $since = match ($range) {
             '24h' => Carbon::now()->subDay(),
             '7d' => Carbon::now()->subDays(7),
+            '30d' => Carbon::now()->subDays(30),
+            'all' => Carbon::createFromTimestamp(0),
             default => Carbon::now()->subDay(),
         };
 
         $detections = Detection::query()
+            ->with('classification.category')
             ->where('detected_at', '>=', $since)
             ->get();
 
-        if ($detections->isEmpty()) {
-            return response()->json([
-                ['label' => 'Plastics', 'percent' => 58],
-                ['label' => 'Fishing gear', 'percent' => 19],
-                ['label' => 'Styrofoam', 'percent' => 14],
-                ['label' => 'Other', 'percent' => 9],
-            ]);
-        }
-
         $buckets = [
+            'Papers' => 0,
             'Plastics' => 0,
-            'Fishing gear' => 0,
-            'Styrofoam' => 0,
-            'Other' => 0,
+            'Metals' => 0,
+            'Wood' => 0,
+            'Glass' => 0,
         ];
 
         foreach ($detections as $detection) {
-            $label = strtolower($detection->class_label);
-            $weight = max($detection->count, 1);
-
-            if (str_contains($label, 'plastic') || str_contains($label, 'bottle')) {
-                $buckets['Plastics'] += $weight;
-            } elseif (str_contains($label, 'net') || str_contains($label, 'fishing')) {
-                $buckets['Fishing gear'] += $weight;
-            } elseif (str_contains($label, 'styrofoam')) {
-                $buckets['Styrofoam'] += $weight;
-            } else {
-                $buckets['Other'] += $weight;
-            }
+            $categoryName = (string) ($detection->classification?->category?->category_name ?? '');
+            $bucket = match (true) {
+                str_contains(strtolower($categoryName), 'paper') => 'Papers',
+                str_contains(strtolower($categoryName), 'metal') => 'Metals',
+                str_contains(strtolower($categoryName), 'wood') => 'Wood',
+                str_contains(strtolower($categoryName), 'glass') => 'Glass',
+                default => 'Plastics',
+            };
+            $buckets[$bucket] += max((int) $detection->quantity, 1);
         }
 
-        $total = array_sum($buckets) ?: 1;
+        $total = array_sum($buckets);
 
         $composition = collect($buckets)->map(function (int $count, string $label) use ($total) {
             return [
                 'label' => $label,
-                'percent' => (int) round(($count / $total) * 100),
+                'percent' => $total > 0 ? (int) round(($count / $total) * 100) : 0,
+                'count' => $count,
             ];
         })->values();
 
         return response()->json($composition);
+    }
+
+    public function trends(): JsonResponse
+    {
+        $today = Carbon::today()->endOfDay();
+
+        $daily = [];
+        for ($i = 6; $i >= 0; $i--) {
+            $day = Carbon::today()->subDays($i);
+            $daily[] = [
+                'label' => $day->format('D'),
+                'value' => $this->countBetween($day->copy()->startOfDay(), $day->copy()->endOfDay()),
+            ];
+        }
+
+        $weekly = [];
+        for ($i = 3; $i >= 0; $i--) {
+            $start = Carbon::today()->startOfWeek(Carbon::MONDAY)->subWeeks($i);
+            $end = $start->copy()->endOfWeek(Carbon::SUNDAY);
+            if ($end->gt($today)) {
+                $end = $today->copy();
+            }
+            $weekly[] = [
+                'label' => 'W'.(4 - $i),
+                'value' => $this->countBetween($start, $end),
+            ];
+        }
+
+        $monthly = [];
+        for ($i = 5; $i >= 0; $i--) {
+            $month = Carbon::today()->startOfMonth()->subMonths($i);
+            $start = $month->copy()->startOfMonth();
+            $end = $month->copy()->endOfMonth();
+            if ($end->gt($today)) {
+                $end = $today->copy();
+            }
+            $monthly[] = [
+                'label' => $month->format('M'),
+                'value' => $this->countBetween($start, $end),
+            ];
+        }
+
+        return response()->json([
+            'daily' => $daily,
+            'weekly' => $weekly,
+            'monthly' => $monthly,
+        ]);
+    }
+
+    private function countBetween(Carbon $from, Carbon $to): int
+    {
+        return (int) Detection::query()
+            ->where('detected_at', '>=', $from)
+            ->where('detected_at', '<=', $to)
+            ->sum('quantity');
     }
 
     private function percentDelta(int $current, int $previous): int

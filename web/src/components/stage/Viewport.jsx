@@ -1,54 +1,54 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useRef } from 'react';
 import StreamPlayer from './StreamPlayer';
 import DetectionOverlay from './DetectionOverlay';
 import { useCameraStore } from '../../stores/useCameraStore';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 import { useYoloOverlay } from '../../hooks/useYoloOverlay';
-import { isBrowserPlayable, isRtspUrl } from '../../lib/streamUrl';
+import { useAuthStore } from '../../stores/useAuthStore';
 import { HUD_COORDS } from '../../data/mock';
 
-/** Grid tile: mirrors the kept-alive main player for the active cam. */
+const GO2RTC_BASE = import.meta.env.VITE_GO2RTC_URL || 'http://localhost:1990';
+
+/** Map camera id → go2rtc stream name (cam01, cam02, …). */
+function go2rtcSrcFor(camera) {
+  const id = String(camera?.id || '').toUpperCase();
+  const match = id.match(/CAM-?0*(\d+)/i);
+  if (match) return `cam${String(match[1]).padStart(2, '0')}`;
+  if (camera?.go2rtc_src) return camera.go2rtc_src;
+  return null;
+}
+
+/** Known go2rtc stream names defined in gateway/go2rtc.yaml. */
+const KNOWN_GO2RTC = new Set(['cam01']);
+
+function streamEmbedUrl(camera) {
+  const src = go2rtcSrcFor(camera);
+  if (!src) return null;
+  if (camera?.go2rtc_src) {
+    return `${GO2RTC_BASE}/webrtc.html?src=${encodeURIComponent(camera.go2rtc_src)}`;
+  }
+  if (!KNOWN_GO2RTC.has(src)) return null;
+  return `${GO2RTC_BASE}/webrtc.html?src=${encodeURIComponent(src)}`;
+}
+
+/** Browser-playable MSE URL for the main <video> (via Vite /go2rtc proxy). */
+function streamMseUrl(camera) {
+  const src = camera?.go2rtc_src || go2rtcSrcFor(camera);
+  if (!src) return null;
+  if (!camera?.go2rtc_src && !KNOWN_GO2RTC.has(src)) return null;
+  return `/go2rtc/api/stream.mp4?src=${encodeURIComponent(src)}`;
+}
+
+/** Grid tile with live go2rtc embed (or empty/offline state). */
 function CameraTile({ camera, active, onSelect }) {
-  const canvasRef = useRef(null);
-  const playable =
-    !!camera.stream_url &&
-    !isRtspUrl(camera.stream_url, camera.protocol) &&
-    isBrowserPlayable(camera.stream_url, camera.protocol);
-
-  useEffect(() => {
-    if (!active || !playable) return undefined;
-    const canvas = canvasRef.current;
-    if (!canvas) return undefined;
-
-    const tick = () => {
-      const video = document.querySelector('#viewport .viewport-player .stream-video');
-      const img = document.querySelector('#viewport .viewport-player .stream-img');
-      const source =
-        video && video.style.display !== 'none' && video.readyState >= 2
-          ? video
-          : img && img.style.display !== 'none' && img.naturalWidth
-            ? img
-            : null;
-      if (!source) return;
-      const w = source.videoWidth || source.naturalWidth || 320;
-      const h = source.videoHeight || source.naturalHeight || 180;
-      if (canvas.width !== w) canvas.width = w;
-      if (canvas.height !== h) canvas.height = h;
-      try {
-        canvas.getContext('2d').drawImage(source, 0, 0, w, h);
-      } catch {
-        /* tainted / not ready */
-      }
-    };
-
-    tick();
-    const id = setInterval(tick, 200);
-    return () => clearInterval(id);
-  }, [active, playable]);
+  const embedUrl = streamEmbedUrl(camera);
+  const offline = camera.status === 'offline';
+  // Only force-show live iframe for streams we know exist, or any non-offline cam
+  const showIframe = Boolean(embedUrl) && !offline;
 
   return (
     <div
-      className={`grid-tile${active ? ' active' : ''}`}
+      className={`grid-tile${active ? ' active' : ''}${offline ? ' offline' : ''}`}
       role="button"
       tabIndex={0}
       onClick={() => onSelect(camera.id)}
@@ -60,20 +60,28 @@ function CameraTile({ camera, active, onSelect }) {
       }}
     >
       <div className="grid-tile-feed">
-        {active && playable ? (
-          <canvas ref={canvasRef} className="grid-tile-mirror" aria-hidden="true" />
+        {showIframe ? (
+          <iframe
+            className="grid-tile-iframe"
+            src={embedUrl}
+            title={`${camera.id} stream`}
+            allow="autoplay; encrypted-media"
+            loading="lazy"
+          />
         ) : (
           <div className="grid-tile-empty">
             <span>{camera.id}</span>
             <small>
-              {!camera.stream_url
-                ? 'No stream'
-                : !playable
-                  ? 'Needs HLS/MSE gateway'
-                  : 'Select to view'}
+              {offline
+                ? 'Offline'
+                : !embedUrl
+                  ? 'Add stream in go2rtc'
+                  : 'Unavailable'}
             </small>
           </div>
         )}
+        {active && <span className="grid-tile-badge">Active</span>}
+        {showIframe && <span className="grid-tile-live">LIVE</span>}
       </div>
       <div className="grid-tile-label">{camera.name}</div>
     </div>
@@ -98,13 +106,15 @@ export default function Viewport() {
   const setGridView = useCameraStore((s) => s.setGridView);
   const settings = useSettingsStore((s) => s.settings);
   const openSettings = useSettingsStore((s) => s.openSettings);
+  const token = useAuthStore((s) => s.token);
 
-  const url = activeCamera?.stream_url || settings.stream?.url || '';
-  const protocol = activeCamera?.protocol || settings.stream?.protocol || '';
+  const mseUrl = streamMseUrl(activeCamera);
+  const url = mseUrl || '/stream.mjpeg';
+  const protocol = mseUrl ? 'MSE' : 'MJPEG';
   const conf = settings.detection?.confidence ?? 0.55;
 
   useYoloOverlay({
-    enabled: detectionOn && !gridView,
+    enabled: Boolean(token) && detectionOn && !gridView,
     cameraId: activeCamera?.id || 'CAM-01',
   });
 
@@ -135,7 +145,6 @@ export default function Viewport() {
       id="viewport"
       ref={viewportRef}
     >
-      {/* Keep one MSE decoder alive across grid toggle — unmounting kills the feed */}
       <div className={`viewport-player${gridView ? ' is-parked' : ''}`}>
         <StreamPlayer
           key={activeCameraId || 'cam'}

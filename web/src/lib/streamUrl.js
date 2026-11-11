@@ -17,7 +17,8 @@ function viaDevProxy(absoluteUrl) {
   try {
     const u = new URL(absoluteUrl, window.location.origin);
     const localGo2 =
-      (u.hostname === '127.0.0.1' || u.hostname === 'localhost') && u.port === '1984';
+      (u.hostname === '127.0.0.1' || u.hostname === 'localhost') &&
+      (u.port === '1984' || u.port === '1990');
     if (localGo2) {
       return `${window.location.origin}/go2rtc${u.pathname}${u.search}`;
     }

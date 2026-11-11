@@ -1,8 +1,8 @@
-/** Poll interval for detections and today's stats (ms). */
-export const POLL_INTERVAL_MS = 15000;
+/** How often Live Monitor refreshes Detection Log + stats from Laravel. */
+export const POLL_INTERVAL_MS = 5000;
 
 /** Poll interval for YOLO live overlay boxes (ms). */
-export const OVERLAY_POLL_MS = 1000;
+export const OVERLAY_POLL_MS = 2000;
 
 export const THEME_STORAGE_KEY = 'tidalwatch-theme';
 export const AUTH_STORAGE_KEY = 'tidalwatch-auth';

@@ -10,8 +10,8 @@ export function useAutoLogin() {
   useEffect(() => {
     if (token) return;
 
-    const email = import.meta.env.VITE_DEMO_EMAIL || 'operator@tidalwatch.test';
-    const password = import.meta.env.VITE_DEMO_PASSWORD || 'password';
+    const email = import.meta.env.VITE_DEMO_EMAIL || 'dioquinojimscarl@tcc.edu.ph';
+    const password = import.meta.env.VITE_DEMO_PASSWORD || 'tapolink123';
 
     loginApi(email, password)
       .then((data) => setAuth(data.token, data.user))

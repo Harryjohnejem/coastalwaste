@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import * as settingsApi from '../api/settings';
 import * as detectionsApi from '../api/detections';
 import * as reportsApi from '../api/reports';
+import * as quotasApi from '../api/quotas';
+import * as wasteCatalogApi from '../api/wasteCatalog';
 import {
   MOCK_SETTINGS,
   MOCK_STATS,
@@ -27,13 +29,27 @@ export const useSettingsStore = create((set, get) => ({
   composition: MOCK_COMPOSITION,
   compositionLoading: false,
 
-  openSettings: () => set({ settingsOpen: true }),
-  closeSettings: () => set({ settingsOpen: false }),
+  chartTrends: null,
+  trendsLoading: false,
 
-  /** Keep a short client-side feed of YOLO log hits (API also persists them). */
+  quotas: [],
+  quotasLoading: false,
+
+  wasteCatalog: [],
+  wasteCatalogLoading: false,
+
+  settingsTab: 'camera',
+  openSettings: (tab) =>
+    set({
+      settingsOpen: true,
+      settingsTab: typeof tab === 'string' ? tab : 'camera',
+    }),
+  closeSettings: () => set({ settingsOpen: false, settingsTab: 'camera' }),
+
+  /** Keep a short client-side feed of YOLO log hits + Live Monitor snapshots. */
   prependLiveDetection: (row) => {
     set((s) => ({
-      liveDetections: [row, ...s.liveDetections].slice(0, 40),
+      liveDetections: [row, ...s.liveDetections].slice(0, 80),
     }));
   },
 
@@ -51,16 +67,17 @@ export const useSettingsStore = create((set, get) => ({
   },
 
   saveSettings: async (next) => {
-    // TODO: POST config to your backend / persist to your store
     set({ settings: next });
     try {
       await settingsApi.updateSettings(next);
-      set({ settingsOpen: false });
+      set({ settingsOpen: false, settingsError: null });
+      return true;
     } catch (err) {
       set({
         settingsError: err.message || 'Could not save settings.',
         settingsOpen: false,
       });
+      return false;
     }
   },
 
@@ -77,10 +94,9 @@ export const useSettingsStore = create((set, get) => ({
           ...MOCK_STATS,
           ...stats,
           deltas: { ...MOCK_STATS.deltas, ...(stats?.deltas || {}) },
-          hotspots:
-            stats?.hotspots != null
-              ? { ...MOCK_STATS.hotspots, ...(typeof stats.hotspots === 'object' ? stats.hotspots : {}) }
-              : MOCK_STATS.hotspots,
+          total_detections: stats?.total_detections ?? MOCK_STATS.total_detections,
+          month_detections: stats?.month_detections ?? MOCK_STATS.month_detections,
+          avg_confidence: stats?.avg_confidence ?? MOCK_STATS.avg_confidence,
         },
         statsLoading: false,
       });
@@ -106,15 +122,65 @@ export const useSettingsStore = create((set, get) => ({
     }
   },
 
-  fetchComposition: async () => {
+  fetchComposition: async (range = '24h') => {
     set({ compositionLoading: true });
     try {
-      const composition = await detectionsApi.getComposition('24h');
+      const composition = await detectionsApi.getComposition(range);
       const list = Array.isArray(composition) ? composition : composition?.data ?? [];
       set({ composition: list, compositionLoading: false });
     } catch {
       set({ compositionLoading: false });
     }
+  },
+
+  fetchTrends: async () => {
+    set({ trendsLoading: true });
+    try {
+      const trends = await detectionsApi.getTrends();
+      set({
+        chartTrends: {
+          daily: Array.isArray(trends?.daily) ? trends.daily : [],
+          weekly: Array.isArray(trends?.weekly) ? trends.weekly : [],
+          monthly: Array.isArray(trends?.monthly) ? trends.monthly : [],
+        },
+        trendsLoading: false,
+      });
+    } catch {
+      set({ trendsLoading: false });
+    }
+  },
+
+  fetchQuotas: async () => {
+    try {
+      const quotas = await quotasApi.listQuotas();
+      const list = Array.isArray(quotas) ? quotas : quotas?.data ?? [];
+      set({ quotas: list, quotasLoading: false });
+    } catch {
+      set({ quotasLoading: false });
+    }
+  },
+
+  fetchWasteCatalog: async () => {
+    set({ wasteCatalogLoading: true });
+    try {
+      const catalog = await wasteCatalogApi.listWasteCatalog();
+      const list = Array.isArray(catalog) ? catalog : catalog?.data ?? [];
+      set({ wasteCatalog: list, wasteCatalogLoading: false });
+    } catch {
+      set({ wasteCatalogLoading: false });
+    }
+  },
+
+  addWasteCategory: async (payload) => {
+    const row = await wasteCatalogApi.createWasteCategory(payload);
+    await get().fetchWasteCatalog();
+    return row;
+  },
+
+  addWasteClassification: async (payload) => {
+    const row = await wasteCatalogApi.createWasteClassification(payload);
+    await get().fetchWasteCatalog();
+    return row;
   },
 
   fileReport: async (payload = {}) => {

@@ -35,3 +35,8 @@ export async function getComposition(range = '24h') {
   const { data } = await client.get('/stats/composition', { params: { range } });
   return data;
 }
+
+export async function getTrends() {
+  const { data } = await client.get('/stats/trends');
+  return data;
+}

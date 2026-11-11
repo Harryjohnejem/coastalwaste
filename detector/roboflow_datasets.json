@@ -1,0 +1,64 @@
+{
+  "comment": "Original cleaned_dataset plus 7 new trained models from Ejems Workspace (project-slug/version).",
+  "workspace": "ejems-workspace",
+  "existing": [
+    {
+      "name": "cleaned_dataset",
+      "model_id": "cleaned_dataset-rfnft/1",
+      "type": "yolov8n",
+      "map": "96.40",
+      "classes": ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+    }
+  ],
+  "new": [
+    {
+      "name": "TrashBot",
+      "model_id": "trashbot-4zkt5-1v6f8/1",
+      "type": "yolov8n",
+      "map": "38.11",
+      "classes": ["Aluminium Foil", "Can", "Cigarette", "Corrugated Carton", "Food Can", "Glass Bottle", "Glass Jar", "Magazine Paper", "Metal Bottle Cap", "Normal Paper", "Paper Cup", "Paper Drink Carton", "Paper Tissue", "Plastic Bottle", "Plastic Bottle Cap", "Plastic Cellophane", "Plastic Container", "Plastic Cup", "Plastic Cup Cover", "Plastic Gloves", "Plastic Straw", "Plastic Utensils", "Plastic Wrapper", "Poly Plastic Bag", "Scrap Metal", "Styrofoam", "Tissues"]
+    },
+    {
+      "name": "LOCAL DATASET",
+      "model_id": "local-dataset-q7yfq/1",
+      "type": "yolov8n",
+      "map": "99.81",
+      "classes": ["Can", "Cardboard", "Face Mask", "Glass Bottle", "Paper Bag", "Paper Cup", "Paper Drink Carton", "Plastic Bag", "Plastic Bottle", "Plastic Cup", "Plastic Wrapper", "Styrofoam"]
+    },
+    {
+      "name": "TACO: Trash Annotations in Context Dataset",
+      "model_id": "taco-trash-annotations-in-context-unbrv/1",
+      "type": "yolov8n-seg",
+      "map": "24.08",
+      "classes": ["Aluminium Foil", "Broken glass", "Can", "Cardboard", "Cigarette", "Ecobag", "Egg Carton", "Food Can", "Food waste", "Garbage Bag", "Glass Bottle", "Glass Jar", "Metal Bottle Cap", "Normal Paper", "Paper Bag", "Paper Cup", "Paper Drink Carton", "Plastic Bottle", "Plastic Bottle Cap", "Plastic Cellophane", "Plastic Container", "Plastic Cup", "Plastic Gloves", "Plastic Straw", "Plastic Utensils", "Plastic Wrapper", "Rope", "Scrap Metal", "Styrofoam", "Styrofoam Cup", "Tissue"]
+    },
+    {
+      "name": "waste-detection-and-classify-o7t4o",
+      "model_id": "waste-detection-and-classify-o7t4o/1",
+      "type": "yolov8n",
+      "map": "85.81",
+      "classes": ["Aluminum Foil", "Can", "Cardboard", "Glass", "News paper", "Paper", "Paper Drink Carton", "Pizza Box", "Plastic Bottle", "Plastic Cellophane", "Plastic Container", "Plastic Cup", "Plastic Cup Cover", "Scrap Metal"]
+    },
+    {
+      "name": "plastic-waste-detection-at-cox-s-jsmlt-gznl1",
+      "model_id": "plastic-waste-detection-at-cox-s-jsmlt-gznl1/2",
+      "type": "yolov8n",
+      "map": "68.53",
+      "classes": ["Face mask", "Metal", "Paper Straw", "Plastic", "Plastic Bottle", "Plastic Bottle Cover", "Plastic Cellophane", "Plastic Cup", "Plastic Straw", "Plastic wrapper", "Sack of Rice", "Styro Cup", "Trashbag", "net", "plastic spoon", "rope"]
+    },
+    {
+      "name": "ecovision-new-w7wzl-y6zkg",
+      "model_id": "ecovision-new-w7wzl-y6zkg/1",
+      "type": "yolov8n",
+      "map": "82.46",
+      "classes": ["Aluminium Wrap", "Can", "Cardboard", "Glass Bottle", "Metal", "Paper", "Plastic", "Plastic Bottle", "Plastic Cellophane", "Plastic Wrapper", "Styrofoam Cup"]
+    },
+    {
+      "name": "new_mp_dataset-2-t3kz0",
+      "model_id": "new_mp_dataset-2-t3kz0/1",
+      "type": "yolov8n",
+      "map": "62.15",
+      "classes": ["CARDBOARD", "Corrugated Carton", "GLASS", "Glass Bottle", "Normal Paper", "PAPER", "PLASTIC", "Plastic Bottle", "Plastic Container", "Plastic Wrapper"]
+    }
+  ]
+}

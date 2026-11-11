@@ -1,24 +1,29 @@
 import { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 
 export default function Modal({
   open,
   onClose,
   labelledBy,
   size,
+  stacked = false,
+  className = '',
   children,
 }) {
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (e) => {
-      if (e.key === 'Escape') onClose?.();
+      if (e.key !== 'Escape') return;
+      if (stacked) e.stopImmediatePropagation();
+      onClose?.();
     };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+    document.addEventListener('keydown', onKey, stacked);
+    return () => document.removeEventListener('keydown', onKey, stacked);
+  }, [open, onClose, stacked]);
 
-  return (
+  const node = (
     <div
-      className={`modal-backdrop${open ? ' open' : ''}`}
+      className={`modal-backdrop${open ? ' open' : ''}${stacked ? ' stacked' : ''}${className ? ` ${className}` : ''}`}
       role="dialog"
       aria-modal="true"
       aria-labelledby={labelledBy}
@@ -29,4 +34,7 @@ export default function Modal({
       <div className={`modal${size === 'sm' ? ' sm' : ''}`}>{children}</div>
     </div>
   );
+
+  if (typeof document === 'undefined') return node;
+  return createPortal(node, document.body);
 }
