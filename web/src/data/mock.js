@@ -1,5 +1,7 @@
 /** Template mock data — used until API responds; also seeds optimistic UI. */
 
+import { LIVE_MODEL_NAME, WASTE_CLASSES } from '../constants';
+
 export const MOCK_CAMERAS = [
   {
     id: 'CAM-01',
@@ -40,7 +42,7 @@ export const MOCK_CAMERAS = [
     sector: 'Sector F',
     stream_url: 'rtsp://192.168.1.67:554',
     protocol: 'RTSP',
-    status: 'offline',
+    status: 'live',
     detections_per_hour: null,
     resolution: '1920 × 1080',
     fps: '25 FPS',
@@ -48,27 +50,55 @@ export const MOCK_CAMERAS = [
 ];
 
 export const MOCK_STATS = {
-  detections: 147,
-  debris_kg: 32.4,
-  hotspots: { flagged: 2, total: 6, labels: 'B, E flagged' },
+  total_detections: 1245,
+  detections: 47,
+  month_detections: 386,
+  avg_confidence: 92.4,
   reports_filed: 5,
   deltas: {
     detections: { direction: 'up', text: '▲ 18% vs yesterday' },
-    debris_kg: { direction: 'up', text: '▲ 4.1 kg since 06:00' },
-    hotspots: { direction: 'neutral', text: 'B, E flagged' },
     reports_filed: { direction: 'down', text: 'All acknowledged' },
   },
 };
+
+export const MOCK_CHART_DAILY = [
+  { label: 'Mon', value: 38 },
+  { label: 'Tue', value: 52 },
+  { label: 'Wed', value: 41 },
+  { label: 'Thu', value: 67 },
+  { label: 'Fri', value: 55 },
+  { label: 'Sat', value: 47 },
+  { label: 'Sun', value: 33 },
+];
+
+export const MOCK_CHART_WEEKLY = [
+  { label: 'W1', value: 210 },
+  { label: 'W2', value: 268 },
+  { label: 'W3', value: 241 },
+  { label: 'W4', value: 312 },
+];
+
+export const MOCK_CHART_MONTHLY = [
+  { label: 'Feb', value: 820 },
+  { label: 'Mar', value: 940 },
+  { label: 'Apr', value: 1102 },
+  { label: 'May', value: 980 },
+  { label: 'Jun', value: 1185 },
+  { label: 'Jul', value: 1245 },
+];
 
 export const MOCK_DETECTIONS = [
   {
     id: 'd1',
     camera_id: 'CAM-03',
     class: 'Plastic bottle cluster',
+    waste_category: 'Plastics',
+    waste_subtype: 'Plastic Bottle',
+    location: 'Paco Beach',
     confidence: 0.94,
     count: 4,
     sector: 'Sector B',
-    detected_at: '14:32:08',
+    detected_at: '2026-07-25 14:32:08',
     severity: 'alert',
     subtitle: '4 objects · intertidal zone',
   },
@@ -76,10 +106,13 @@ export const MOCK_DETECTIONS = [
     id: 'd2',
     camera_id: 'CAM-01',
     class: 'Abandoned fishing net',
+    waste_category: 'Plastics',
+    waste_subtype: 'Fishing Net',
+    location: 'Paco Beach',
     confidence: 0.81,
     count: 1,
     sector: 'Sector B',
-    detected_at: '14:17:41',
+    detected_at: '2026-07-25 14:17:41',
     severity: 'warn',
     subtitle: 'entanglement risk · large item',
   },
@@ -87,42 +120,80 @@ export const MOCK_DETECTIONS = [
     id: 'd3',
     camera_id: 'CAM-02',
     class: 'Styrofoam fragments',
+    waste_category: 'Plastics',
+    waste_subtype: 'Styrofoam',
+    location: 'B-MEG Zone 4',
     confidence: 0.88,
     count: 9,
     sector: 'Sector E',
-    detected_at: '13:58:22',
+    detected_at: '2026-07-25 13:58:22',
     severity: 'alert',
     subtitle: '9 objects · drifting inshore',
   },
   {
     id: 'd4',
     camera_id: 'CAM-01',
-    class: 'Sector A sweep clear',
-    confidence: null,
-    count: 0,
+    class: 'Cardboard sheet',
+    waste_category: 'Papers',
+    waste_subtype: 'Cardboard',
+    location: 'Paco Beach',
+    confidence: 0.76,
+    count: 2,
     sector: 'Sector A',
-    detected_at: '13:30:00',
-    severity: 'info',
-    subtitle: 'scheduled scan · no debris found',
+    detected_at: '2026-07-25 13:30:00',
+    severity: 'alert',
+    subtitle: '2 objects · shoreline',
   },
   {
     id: 'd5',
-    camera_id: null,
-    class: 'Debris density rising',
-    confidence: null,
-    count: 0,
+    camera_id: 'CAM-03',
+    class: 'Metal can',
+    waste_category: 'Metals',
+    waste_subtype: 'Metal Can',
+    location: 'B-MEG Zone 4',
+    confidence: 0.91,
+    count: 1,
     sector: 'Sector E',
-    detected_at: '13:12:55',
-    severity: 'warn',
-    subtitle: 'threshold 70% reached',
+    detected_at: '2026-07-25 13:12:55',
+    severity: 'alert',
+    subtitle: '1 object · near outfall',
+  },
+  {
+    id: 'd6',
+    camera_id: 'CAM-02',
+    class: 'Driftwood',
+    waste_category: 'Wood',
+    waste_subtype: 'Driftwood',
+    location: 'B-MEG Zone 4',
+    confidence: 0.84,
+    count: 1,
+    sector: 'Sector E',
+    detected_at: '2026-07-25 12:48:10',
+    severity: 'info',
+    subtitle: '1 object · washed ashore',
+  },
+  {
+    id: 'd7',
+    camera_id: 'CAM-01',
+    class: 'Glass bottle',
+    waste_category: 'Glass',
+    waste_subtype: 'Glass Bottle',
+    location: 'Paco Beach',
+    confidence: 0.89,
+    count: 1,
+    sector: 'Sector B',
+    detected_at: '2026-07-25 12:21:33',
+    severity: 'alert',
+    subtitle: '1 object · rocky edge',
   },
 ];
 
 export const MOCK_COMPOSITION = [
-  { label: 'Plastics', percent: 58 },
-  { label: 'Fishing gear', percent: 19 },
-  { label: 'Styrofoam', percent: 14 },
-  { label: 'Other', percent: 9 },
+  { label: 'Plastics', percent: 48 },
+  { label: 'Papers', percent: 18 },
+  { label: 'Metals', percent: 14 },
+  { label: 'Glass', percent: 12 },
+  { label: 'Wood', percent: 8 },
 ];
 
 export const MOCK_SETTINGS = {
@@ -136,12 +207,21 @@ export const MOCK_SETTINGS = {
     fps: '25 FPS',
   },
   detection: {
-    model: 'YOLO-World · waste',
-    confidence: 0.6,
-    interval: 5,
-    classes: ['Plastic bottles', 'Plastic bags', 'Fishing nets', 'Styrofoam', 'Metal cans'],
+    model: LIVE_MODEL_NAME,
+    enabled: true,
+    confidence: 0.8,
+    review_confidence: 0.5,
+    interval: 2,
+    classes: [...WASTE_CLASSES],
     showBoxes: true,
     showConfidence: true,
+  },
+  recording: {
+    record_confidence: 0.8,
+    min_confirmation_frames: 3,
+    track_lost_timeout: 3,
+    detection_cooldown: 10,
+    prevent_duplicate: true,
   },
   alerts: {
     densityAlerts: true,
@@ -153,7 +233,7 @@ export const MOCK_SETTINGS = {
     reportFrequency: 'Daily · 06:00',
   },
   station: {
-    name: 'Station 01 — North Shoreline',
+    name: 'Brgy. Gracia',
     lat: '14.3486',
     lon: '121.3244',
     timezone: 'Asia/Manila (UTC+8)',
@@ -166,7 +246,6 @@ export const MOCK_SETTINGS = {
 export const ENV_STRIP = {
   tide: '+0.8 m',
   wind: '14 km/h NE',
-  visibility: 'Good',
 };
 
 export const HUD_COORDS = {

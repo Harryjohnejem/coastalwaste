@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
 import {
+  go2rtcSnapshotUrl,
   isBrowserPlayable,
   isHlsUrl,
   isMjpegUrl,
@@ -16,52 +17,13 @@ import {
  */
 export default function CameraThumb({ url, protocol, active = false, onStatus, paused = false }) {
   const videoRef = useRef(null);
-  const canvasRef = useRef(null);
   const hlsRef = useRef(null);
+  const refreshRef = useRef(null);
   const [mode, setMode] = useState('idle'); // idle | video | img | mirror | none
   const [imgSrc, setImgSrc] = useState(null);
 
-  // Mirror active feed from main viewport — avoids dual decode freeze
   useEffect(() => {
-    if (!active || paused) return undefined;
-    setMode('mirror');
-    onStatus?.('live');
-
-    const canvas = canvasRef.current;
-    if (!canvas) return undefined;
-
-    const tick = () => {
-      const video = document.querySelector(
-        '#viewport .viewport-player .stream-video, #viewport .stream-video',
-      );
-      const img = document.querySelector(
-        '#viewport .viewport-player .stream-img, #viewport .stream-img',
-      );
-      const source =
-        video && video.style.display !== 'none' && video.readyState >= 2
-          ? video
-          : img && img.style.display !== 'none' && img.naturalWidth
-            ? img
-            : null;
-      if (!source) return;
-      const w = source.videoWidth || source.naturalWidth || 320;
-      const h = source.videoHeight || source.naturalHeight || 180;
-      if (canvas.width !== w) canvas.width = w;
-      if (canvas.height !== h) canvas.height = h;
-      try {
-        canvas.getContext('2d').drawImage(source, 0, 0, w, h);
-      } catch {
-        /* ignore */
-      }
-    };
-
-    tick();
-    const id = setInterval(tick, 400);
-    return () => clearInterval(id);
-  }, [active, paused, onStatus]);
-
-  useEffect(() => {
-    if (active || paused) return undefined;
+    if (paused) return undefined;
 
     const video = videoRef.current;
     const cleanupHls = () => {
@@ -86,6 +48,17 @@ export default function CameraThumb({ url, protocol, active = false, onStatus, p
       setMode('none');
       onStatus?.('offline');
       return cleanupHls;
+    }
+
+    const snapshotUrl = go2rtcSnapshotUrl(url);
+    if (snapshotUrl) {
+      setMode('img');
+      const sep = snapshotUrl.includes('?') ? '&' : '?';
+      setImgSrc(`${snapshotUrl}${sep}t=${Date.now()}`);
+      return () => {
+        clearTimeout(refreshRef.current);
+        cleanupHls();
+      };
     }
 
     const playUrl = resolvePlayableUrl(url);
@@ -152,9 +125,6 @@ export default function CameraThumb({ url, protocol, active = false, onStatus, p
 
   return (
     <>
-      {mode === 'mirror' && (
-        <canvas ref={canvasRef} className="cam-thumb-media" aria-hidden="true" />
-      )}
       <video
         ref={videoRef}
         className="cam-thumb-media"
@@ -164,7 +134,34 @@ export default function CameraThumb({ url, protocol, active = false, onStatus, p
         style={{ display: mode === 'video' ? 'block' : 'none' }}
       />
       {mode === 'img' && imgSrc && (
-        <img className="cam-thumb-media" src={imgSrc} alt="" draggable={false} />
+        <img
+          className="cam-thumb-media"
+          src={imgSrc}
+          alt=""
+          draggable={false}
+          onLoad={() => {
+            onStatus?.('live');
+            clearTimeout(refreshRef.current);
+            refreshRef.current = setTimeout(() => {
+              setImgSrc((current) => {
+                if (!current) return current;
+                const base = current.split('&t=')[0];
+                return `${base}&t=${Date.now()}`;
+              });
+            }, 1200);
+          }}
+          onError={() => {
+            onStatus?.('offline');
+            clearTimeout(refreshRef.current);
+            refreshRef.current = setTimeout(() => {
+              setImgSrc((current) => {
+                if (!current) return current;
+                const base = current.split('&t=')[0];
+                return `${base}&t=${Date.now()}`;
+              });
+            }, 2500);
+          }}
+        />
       )}
     </>
   );

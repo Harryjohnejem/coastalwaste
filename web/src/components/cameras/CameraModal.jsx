@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import Modal from '../common/Modal';
 import Switch from '../common/Switch';
+import AppNotice from '../common/AppNotice';
 import { useCameraStore } from '../../stores/useCameraStore';
+import { confirmThenRun } from '../../stores/useNoticeStore';
 
 const emptyForm = {
   name: '',
@@ -65,22 +67,31 @@ export default function CameraModal({ onConnectStream }) {
   const handleTest = async () => {
     setError('');
     setTesting(true);
-    try {
-      if (isEdit && editing?.id) {
-        const result = await testCamera(editing.id, form.stream_url);
-        if (!result?.ok) {
-          setError("Couldn't reach the camera. Check the URL and credentials.");
-        } else {
+    const outcome = await confirmThenRun({
+      skipConfirm: true,
+      busyTitle: 'Testing connection',
+      busyMessage: 'Checking the camera URL and credentials.',
+      busyLabel: 'Testing…',
+      successTitle: 'Connection test',
+      successMessage: isEdit ? 'Camera connection succeeded.' : 'Connection test started.',
+      errorTitle: 'Connection failed',
+      errorFallback: "Couldn't reach the camera. Check the URL and credentials.",
+      work: async () => {
+        if (isEdit && editing?.id) {
+          const result = await testCamera(editing.id, form.stream_url);
+          if (!result?.ok) {
+            throw new Error("Couldn't reach the camera. Check the URL and credentials.");
+          }
           onConnectStream?.(form.stream_url, form.protocol, result.latency_ms);
+          return;
         }
-      } else {
         onConnectStream?.(form.stream_url, form.protocol);
-      }
-    } catch (err) {
-      setError(err.message || "Couldn't reach the camera. Check the URL and credentials.");
-    } finally {
-      setTesting(false);
+      },
+    });
+    if (!outcome.ok && !outcome.cancelled) {
+      setError(outcome.error?.message || "Couldn't reach the camera. Check the URL and credentials.");
     }
+    setTesting(false);
   };
 
   const handleSave = async () => {
@@ -99,59 +110,76 @@ export default function CameraModal({ onConnectStream }) {
       inGrid: form.inGrid,
       status: 'offline',
     };
-    try {
-      if (isEdit && editing) {
-        // TODO: persist cfg to your backend
-        try {
-          await updateCamera(editing.id, payload);
-        } catch {
-          // Optimistic local update when API is unavailable
-          useCameraStore.setState((s) => ({
-            cameras: s.cameras.map((c) =>
-              c.id === editing.id ? { ...c, ...payload } : c,
-            ),
-          }));
+    const outcome = await confirmThenRun({
+      title: isEdit ? 'Save camera changes?' : 'Add this camera?',
+      message: isEdit
+        ? `Update settings for ${form.name.trim() || 'this camera'}?`
+        : `Add ${form.name.trim() || 'this camera'} to the station?`,
+      confirmLabel: isEdit ? 'Save' : 'Add camera',
+      busyTitle: isEdit ? 'Saving camera' : 'Adding camera',
+      busyMessage: isEdit ? 'Updating camera settings.' : 'Adding this camera to the station.',
+      busyLabel: 'Saving…',
+      successTitle: isEdit ? 'Camera saved' : 'Camera added',
+      successMessage: isEdit ? 'Camera settings saved.' : 'Camera added.',
+      errorTitle: 'Camera not saved',
+      work: async () => {
+        if (isEdit && editing) {
+          try {
+            await updateCamera(editing.id, payload);
+          } catch {
+            useCameraStore.setState((s) => ({
+              cameras: s.cameras.map((c) =>
+                c.id === editing.id ? { ...c, ...payload } : c,
+              ),
+            }));
+          }
+          return;
         }
-      } else {
         const id = `CAM-${String(cameras.length + 1).padStart(2, '0')}`;
         try {
           await createCamera({ ...payload, id });
         } catch {
-          // TODO: attempt to connect the new stream and flip the tag to LIVE
           useCameraStore.setState((s) => ({
             cameras: [...s.cameras, { ...payload, id, detections_per_hour: null }],
           }));
         }
-      }
-      closeCameraModal();
-    } catch (err) {
-      setError(err.message || 'Could not save camera.');
-    } finally {
-      setSaving(false);
-    }
+      },
+    });
+    if (outcome.ok) closeCameraModal();
+    if (outcome.error) setError(outcome.error.message || 'Could not save camera.');
+    setSaving(false);
   };
 
   const handleDelete = async () => {
     if (!editing) return;
-    if (!window.confirm(`Remove "${editing.name}" from this station?`)) return;
-    try {
-      // TODO: notify your backend
-      try {
-        await removeCamera(editing.id);
-      } catch {
-        useCameraStore.setState((s) => {
-          const next = s.cameras.filter((c) => c.id !== editing.id);
-          return {
-            cameras: next,
-            activeCameraId:
-              s.activeCameraId === editing.id ? next[0]?.id ?? null : s.activeCameraId,
-          };
-        });
-      }
-      closeCameraModal();
-    } catch (err) {
-      setError(err.message || 'Could not remove camera.');
-    }
+    const outcome = await confirmThenRun({
+      title: 'Remove this camera?',
+      message: `"${editing.name}" will be removed from this station. Live monitoring for this lens will stop.`,
+      confirmLabel: 'Remove camera',
+      variant: 'danger',
+      busyTitle: 'Removing camera',
+      busyMessage: `Removing "${editing.name}" from this station.`,
+      busyLabel: 'Removing…',
+      successTitle: 'Camera removed',
+      successMessage: `"${editing.name}" was removed from this station.`,
+      errorTitle: 'Camera not removed',
+      work: async () => {
+        try {
+          await removeCamera(editing.id);
+        } catch {
+          useCameraStore.setState((s) => {
+            const next = s.cameras.filter((c) => c.id !== editing.id);
+            return {
+              cameras: next,
+              activeCameraId:
+                s.activeCameraId === editing.id ? next[0]?.id ?? null : s.activeCameraId,
+            };
+          });
+        }
+      },
+    });
+    if (outcome.ok) closeCameraModal();
+    if (outcome.error) setError(outcome.error.message || 'Could not remove camera.');
   };
 
   return (
@@ -286,14 +314,14 @@ export default function CameraModal({ onConnectStream }) {
             <button className="test-btn" type="button" onClick={handleTest} disabled={testing}>
               {testing ? 'Testing…' : 'Test connection'}
             </button>
-            {error && <div className="field-error">{error}</div>}
+            {error ? <AppNotice type="error" title="Camera error" message={error} /> : null}
           </div>
         </div>
       </div>
 
       <div className="modal-foot">
         {isEdit && (
-          <button className="btn-danger foot-left" type="button" onClick={handleDelete}>
+          <button className="btn-danger foot-left" type="button" onClick={handleDelete} disabled={saving || testing}>
             Remove camera
           </button>
         )}
@@ -301,7 +329,7 @@ export default function CameraModal({ onConnectStream }) {
           Cancel
         </button>
         <button className="btn-save" type="button" onClick={handleSave} disabled={saving}>
-          {isEdit ? 'Save changes' : 'Add camera'}
+          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Add camera'}
         </button>
       </div>
     </Modal>

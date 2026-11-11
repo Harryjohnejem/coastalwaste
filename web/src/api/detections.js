@@ -1,7 +1,11 @@
 import client from './client';
 
-export async function listDetections(limit = 50) {
-  const { data } = await client.get('/detections', { params: { limit } });
+export async function listDetections(limit = 50, params = {}, config = {}) {
+  const { data } = await client.get('/detections', {
+    params: { limit, ...params },
+    timeout: 20000,
+    ...config,
+  });
   return data;
 }
 
@@ -19,6 +23,16 @@ export async function createDetection(payload) {
   return data;
 }
 
+export async function deleteDetection(id) {
+  const { data } = await client.delete(`/detections/${id}`);
+  return data;
+}
+
+export async function moveDetectionToReview(id) {
+  const { data } = await client.post(`/detections/${id}/review`);
+  return data;
+}
+
 export async function getLiveOverlay(cameraId) {
   const { data } = await client.get('/detections/live', {
     params: { camera_id: cameraId },
@@ -33,5 +47,10 @@ export async function getTodayStats() {
 
 export async function getComposition(range = '24h') {
   const { data } = await client.get('/stats/composition', { params: { range } });
+  return data;
+}
+
+export async function getTrends() {
+  const { data } = await client.get('/stats/trends');
   return data;
 }

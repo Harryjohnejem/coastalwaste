@@ -9,7 +9,7 @@ export default function WasteComposition() {
   return (
     <section className="panel">
       <div className="panel-head">
-        <span className="panel-title">Waste composition · 24h</span>
+        <span className="panel-title">Waste composition</span>
       </div>
       <div className="comp">
         {loading && composition.length === 0 && (
@@ -22,7 +22,7 @@ export default function WasteComposition() {
           <div className="comp-row" key={row.label}>
             <div className="comp-top">
               <span>{row.label}</span>
-              <span>{row.percent}%</span>
+              <span>{row.count ?? 0} · {row.percent}%</span>
             </div>
             <div className="comp-bar">
               <div

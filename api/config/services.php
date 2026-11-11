@@ -37,6 +37,17 @@ return [
 
     'detector' => [
         'key' => env('DETECTOR_KEY', 'tidalwatch-detector-local'),
+        'match_threshold' => (float) env('CROSS_CAMERA_MATCH_THRESHOLD', 0.82),
+        'match_window_seconds' => (int) env('CROSS_CAMERA_WINDOW_SECONDS', 120),
+    ],
+
+    'roboflow' => [
+        'key' => env('ROBOFLOW_API_KEY'),
+        'workspace' => env('ROBOFLOW_WORKSPACE'),
+        'project' => env('ROBOFLOW_PROJECT'),
+        'model_type' => env('ROBOFLOW_MODEL_TYPE', 'yolov11'),
+        'speed' => env('ROBOFLOW_SPEED', 'fast'),
+        'base_url' => env('ROBOFLOW_API_URL', 'https://api.roboflow.com'),
     ],
 
 ];

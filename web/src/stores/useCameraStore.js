@@ -3,6 +3,30 @@ import * as camerasApi from '../api/cameras';
 import { MOCK_CAMERAS } from '../data/mock';
 import { resolvePlayableUrl } from '../lib/streamUrl';
 
+function overlayFrameUnchanged(current, next) {
+  if (Boolean(current.overlayKnown) !== Boolean(next.overlayKnown)) return false;
+  if ((current.inferenceMs ?? null) !== (next.inferenceMs ?? null)) return false;
+  if ((current.liveModel ?? null) !== (next.liveModel ?? null)) return false;
+  const prevMeta = current.overlayMeta;
+  const nextMeta = next.overlayMeta;
+  if ((prevMeta?.frameId ?? null) !== (nextMeta?.frameId ?? null)) return false;
+  if (String(prevMeta?.cameraId || '') !== String(nextMeta?.cameraId || '')) return false;
+  if (Boolean(prevMeta?.connected) !== Boolean(nextMeta?.connected)) return false;
+  if (Boolean(prevMeta?.motionActive) !== Boolean(nextMeta?.motionActive)) return false;
+  const left = current.overlayBoxes || [];
+  const right = next.overlayBoxes || [];
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    const a = left[i];
+    const b = right[i];
+    if ((a?.track_id ?? null) !== (b?.track_id ?? null)) return false;
+    if ((a?.class || '') !== (b?.class || '')) return false;
+    if (Math.round(Number(a?.left) || 0) !== Math.round(Number(b?.left) || 0)) return false;
+    if (Math.round(Number(a?.top) || 0) !== Math.round(Number(b?.top) || 0)) return false;
+  }
+  return true;
+}
+
 export const useCameraStore = create((set, get) => ({
   cameras: MOCK_CAMERAS,
   activeCameraId: MOCK_CAMERAS[0]?.id ?? null,
@@ -13,21 +37,37 @@ export const useCameraStore = create((set, get) => ({
   error: null,
   cameraModal: { open: false, mode: 'add', cameraId: null },
   detectionOn: true,
+  overlayNonce: 0,
   overlayBoxes: [],
+  overlayKnown: false,
+  overlayMeta: null, // { cameraId, frameId, detectToPublishMs, inferenceFps, ... }
   inferenceMs: null, // from Python YOLO worker
   liveModel: null,
   gridView: false,
   recording: false,
-  deckNotice: null, // short status toast under the deck actions
 
   setGridView: (gridView) => set({ gridView }),
   toggleGridView: () => set((s) => ({ gridView: !s.gridView })),
   setRecording: (recording) => set({ recording }),
-  setDeckNotice: (deckNotice) => set({ deckNotice }),
   setDetectionOn: (detectionOn) => set({ detectionOn }),
+  refreshOverlay: () =>
+    set((s) => ({ detectionOn: true, overlayNonce: s.overlayNonce + 1 })),
   setOverlayBoxes: (overlayBoxes) => set({ overlayBoxes }),
+  setOverlayKnown: (overlayKnown) => set({ overlayKnown }),
+  setOverlayMeta: (overlayMeta) => set({ overlayMeta }),
   setInferenceMs: (inferenceMs) => set({ inferenceMs }),
   setLiveModel: (liveModel) => set({ liveModel }),
+  applyOverlay: (next) => set((s) => {
+    const overlayBoxes = next.overlayBoxes ?? [];
+    const overlayMeta = next.overlayMeta ?? null;
+    const overlayKnown = next.overlayKnown !== false;
+    const inferenceMs = next.inferenceMs ?? null;
+    const liveModel = next.liveModel ?? s.liveModel;
+    if (overlayFrameUnchanged(s, { overlayBoxes, overlayMeta, overlayKnown, inferenceMs, liveModel })) {
+      return s;
+    }
+    return { overlayBoxes, overlayMeta, overlayKnown, inferenceMs, liveModel };
+  }),
 
   setActiveCamera: (id) => {
     const prev = get().activeCameraId;
@@ -37,7 +77,28 @@ export const useCameraStore = create((set, get) => ({
       streamStatus: 'STANDBY',
       liveSince: null,
       latencyMs: null,
+      // Never carry boxes from one lens onto another.
+      overlayBoxes: [],
+      overlayKnown: false,
+      overlayMeta: null,
+      inferenceMs: null,
     });
+  },
+
+  /** Cycle to previous / next camera (wide-angle ↔ second lens). */
+  cycleCamera: (direction = 1) => {
+    const { cameras, activeCameraId, setActiveCamera, setGridView } = get();
+    if (!cameras.length) return null;
+    const idx = Math.max(
+      0,
+      cameras.findIndex((c) => c.id === activeCameraId),
+    );
+    const next =
+      cameras[(idx + direction + cameras.length) % cameras.length] ?? null;
+    if (!next) return null;
+    setGridView(false);
+    setActiveCamera(next.id);
+    return next;
   },
 
   setStreamStatus: (streamStatus) => {
@@ -79,9 +140,11 @@ export const useCameraStore = create((set, get) => ({
           return;
         }
         try {
-          const probeUrl = resolvePlayableUrl(url) || url;
-          const res = await fetch(probeUrl, { method: 'GET', signal: AbortSignal.timeout(4000) });
-          // go2rtc MSE returns 200 and starts streaming — abort after headers
+          const playUrl = resolvePlayableUrl(url) || url;
+          const probeUrl = String(playUrl).includes('/api/stream.mp4')
+            ? String(playUrl).replace('/api/stream.mp4', '/api/frame.jpeg')
+            : playUrl;
+          const res = await fetch(probeUrl, { method: 'GET', signal: AbortSignal.timeout(8000) });
           if (res.ok) setCameraStatus(cam.id, 'live');
           else setCameraStatus(cam.id, 'offline');
         } catch {
@@ -102,7 +165,7 @@ export const useCameraStore = create((set, get) => ({
   },
 
   fetchCameras: async () => {
-    set({ loading: true, error: null });
+    set({ error: null });
     try {
       const cameras = await camerasApi.listCameras();
       const list = Array.isArray(cameras) ? cameras : cameras?.data ?? [];

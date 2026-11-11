@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback } from 'react';
 import { useCameraStore } from '../../stores/useCameraStore';
 import CameraThumb from './CameraThumb';
 import { isBrowserPlayable, isRtspUrl } from '../../lib/streamUrl';
@@ -19,17 +19,11 @@ export default function CameraCard({ camera, active, onSelect, onEdit }) {
 
   const onThumbStatus = useCallback(
     (status) => {
+      // A preview frame can fail without the live stream being down.
       if (status === 'live') setCameraStatus(camera.id, 'live');
-      if (status === 'offline') setCameraStatus(camera.id, 'offline');
     },
     [camera.id, setCameraStatus],
   );
-
-  useEffect(() => {
-    if (rtsp || !camera.stream_url) {
-      setCameraStatus(camera.id, 'offline');
-    }
-  }, [rtsp, camera.stream_url, camera.id, setCameraStatus]);
 
   const showFeed = playable && !rtsp;
 

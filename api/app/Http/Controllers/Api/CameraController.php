@@ -16,7 +16,7 @@ class CameraController extends Controller
     public function index(): JsonResponse
     {
         $cameras = Camera::query()
-            ->orderBy('id')
+            ->orderBy('camera_code')
             ->get()
             ->map(fn (Camera $camera) => $camera->toApiArray());
 
@@ -27,45 +27,42 @@ class CameraController extends Controller
     {
         $data = $this->validated($request);
 
-        $id = $request->input('id');
-        if (! $id) {
+        $code = $request->input('id') ?: $request->input('camera_code');
+        if (! $code) {
             $next = Camera::query()->count() + 1;
-            $id = 'CAM-'.str_pad((string) $next, 2, '0', STR_PAD_LEFT);
-            while (Camera::query()->whereKey($id)->exists()) {
+            $code = 'CAM-'.str_pad((string) $next, 2, '0', STR_PAD_LEFT);
+            while (Camera::query()->where('camera_code', $code)->exists()) {
                 $next++;
-                $id = 'CAM-'.str_pad((string) $next, 2, '0', STR_PAD_LEFT);
+                $code = 'CAM-'.str_pad((string) $next, 2, '0', STR_PAD_LEFT);
             }
         }
 
         $camera = Camera::query()->create([
-            'id' => $id,
+            'camera_code' => $code,
             ...$data,
         ]);
 
         return response()->json($camera->toApiArray(), 201);
     }
 
-    public function update(Request $request, string $camera): JsonResponse
+    public function update(Request $request, Camera $camera): JsonResponse
     {
-        $model = Camera::query()->findOrFail($camera);
-        $model->update($this->validated($request, partial: true));
+        $camera->update($this->validated($request, partial: true));
 
-        return response()->json($model->fresh()->toApiArray());
+        return response()->json($camera->fresh()->toApiArray());
     }
 
-    public function destroy(string $camera): JsonResponse
+    public function destroy(Camera $camera): JsonResponse
     {
-        Camera::query()->findOrFail($camera)->delete();
+        $camera->delete();
 
         return response()->json(['ok' => true]);
     }
 
-    public function test(string $camera): JsonResponse
+    public function test(Camera $camera): JsonResponse
     {
-        $model = Camera::query()->findOrFail($camera);
-
         return response()->json(
-            $this->streamProbe->probe($model->stream_url, $model->protocol),
+            $this->streamProbe->probe($camera->stream_url, $camera->protocol),
         );
     }
 
@@ -76,14 +73,16 @@ class CameraController extends Controller
     {
         $rules = [
             'name' => [$partial ? 'sometimes' : 'required', 'string', 'max:255'],
-            'sector' => ['sometimes', 'string', 'max:64'],
+            'camera_name' => ['sometimes', 'string', 'max:255'],
+            'sector' => ['sometimes', 'string', 'max:120'],
+            'monitoring_location' => ['sometimes', 'string', 'max:120'],
+            'ip_address' => ['nullable', 'string', 'max:45'],
             'stream_url' => ['nullable', 'string', 'max:2048'],
             'protocol' => ['sometimes', 'string', 'max:64'],
             'transport' => ['sometimes', 'string', 'max:32'],
             'username' => ['nullable', 'string', 'max:255'],
             'password' => ['nullable', 'string', 'max:255'],
             'status' => ['sometimes', 'string', 'max:32'],
-            'detections_per_hour' => ['nullable', 'integer', 'min:0'],
             'resolution' => ['sometimes', 'string', 'max:64'],
             'fps' => ['sometimes', 'string', 'max:32'],
             'detection' => ['sometimes', 'boolean'],
@@ -93,13 +92,21 @@ class CameraController extends Controller
         $validated = $request->validate($rules);
         $payload = [];
 
-        if (array_key_exists('name', $validated)) {
-            $payload['name'] = $validated['name'];
+        $name = $validated['camera_name'] ?? $validated['name'] ?? null;
+        if ($name !== null) {
+            $payload['camera_name'] = $name;
         } elseif (! $partial) {
-            $payload['name'] = 'New camera';
+            $payload['camera_name'] = 'New camera';
         }
 
-        foreach (['sector', 'stream_url', 'transport', 'username', 'password', 'status', 'detections_per_hour', 'resolution', 'fps'] as $field) {
+        $location = $validated['monitoring_location'] ?? $validated['sector'] ?? null;
+        if ($location !== null) {
+            $payload['monitoring_location'] = $location;
+        } elseif (! $partial) {
+            $payload['monitoring_location'] = 'Paco Beach';
+        }
+
+        foreach (['ip_address', 'stream_url', 'transport', 'username', 'password', 'resolution', 'fps'] as $field) {
             if (array_key_exists($field, $validated)) {
                 $payload[$field] = $validated[$field];
             }
@@ -109,6 +116,12 @@ class CameraController extends Controller
             $payload['protocol'] = $this->normalizeProtocol($validated['protocol']);
         } elseif (! $partial) {
             $payload['protocol'] = 'RTSP';
+        }
+
+        if (array_key_exists('status', $validated)) {
+            $payload['status'] = $this->normalizeStatus($validated['status']);
+        } elseif (! $partial) {
+            $payload['status'] = 'Offline';
         }
 
         if (array_key_exists('detection', $validated)) {
@@ -125,15 +138,20 @@ class CameraController extends Controller
 
         if (! $partial) {
             $payload += [
-                'sector' => $payload['sector'] ?? 'Sector A',
                 'transport' => $payload['transport'] ?? 'TCP',
-                'status' => $payload['status'] ?? 'offline',
                 'resolution' => $payload['resolution'] ?? '1920 × 1080',
                 'fps' => $payload['fps'] ?? '25 FPS',
             ];
         }
 
         return $payload;
+    }
+
+    private function normalizeStatus(string $status): string
+    {
+        $s = strtolower($status);
+
+        return in_array($s, ['online', 'live'], true) ? 'Online' : 'Offline';
     }
 
     private function normalizeProtocol(string $protocol): string

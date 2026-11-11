@@ -1,25 +1,22 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Modal from '../common/Modal';
 import Switch from '../common/Switch';
 import RangeField from '../common/RangeField';
 import ChipSet from '../common/ChipSet';
+import AppNotice from '../common/AppNotice';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 import { useCameraStore } from '../../stores/useCameraStore';
+import { useAuthStore } from '../../stores/useAuthStore';
+import { acknowledgeAction, confirmAction, confirmThenRun } from '../../stores/useNoticeStore';
+import { LIVE_MODEL_NAME, MODEL_OPTIONS, WASTE_CLASSES } from '../../constants';
 
-const CLASS_OPTIONS = [
-  'Plastic bottles',
-  'Plastic bags',
-  'Fishing nets',
-  'Styrofoam',
-  'Metal cans',
-  'Glass',
-  'Rubber / tires',
-  'Organic debris',
-];
+const CLASS_OPTIONS = WASTE_CLASSES;
 
 const TABS = [
   { id: 'camera', label: 'Camera source', icon: 'cam' },
   { id: 'detection', label: 'Detection', icon: 'det' },
+  { id: 'recording', label: 'Recording Conditions', icon: 'rec' },
   { id: 'alerts', label: 'Alerts & reports', icon: 'alert' },
   { id: 'system', label: 'Station & storage', icon: 'sys' },
 ];
@@ -41,6 +38,14 @@ function TabIcon({ name }) {
       </svg>
     );
   }
+  if (name === 'rec') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <path d="M9 11l3 3L22 4" />
+        <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+      </svg>
+    );
+  }
   if (name === 'alert') {
     return (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -57,23 +62,72 @@ function TabIcon({ name }) {
 }
 
 export default function SettingsModal({ onTestStream }) {
+  const navigate = useNavigate();
   const open = useSettingsStore((s) => s.settingsOpen);
   const closeSettings = useSettingsStore((s) => s.closeSettings);
   const settings = useSettingsStore((s) => s.settings);
   const saveSettings = useSettingsStore((s) => s.saveSettings);
+  const settingsSaving = useSettingsStore((s) => s.settingsSaving);
+  const settingsLoading = useSettingsStore((s) => s.settingsLoading);
+  const settingsTab = useSettingsStore((s) => s.settingsTab);
   const setStreamStatus = useCameraStore((s) => s.setStreamStatus);
+  const logout = useAuthStore((s) => s.logout);
 
   const [tab, setTab] = useState('camera');
   const [form, setForm] = useState(settings);
   const [testError, setTestError] = useState('');
+  const hydratedRef = useRef(false);
+
+  const handleLogout = async () => {
+    const accepted = await confirmAction({
+      title: 'Log out?',
+      message: 'You will need to sign in again to use the monitoring station.',
+      confirmLabel: 'Log out',
+      variant: 'warning',
+    });
+    if (!accepted) return;
+    closeSettings();
+    logout();
+    navigate('/login', { replace: true });
+  };
 
   useEffect(() => {
-    if (open) {
-      setForm(settings);
-      setTab('camera');
-      setTestError('');
+    if (!open) {
+      hydratedRef.current = false;
+      return undefined;
     }
-  }, [open, settings]);
+    if (hydratedRef.current) return undefined;
+    if (settingsLoading) return undefined;
+    hydratedRef.current = true;
+    const selected = settings?.detection?.classes || [];
+    const savedDatasetClasses =
+      selected.length > 0 && selected.every((name) => WASTE_CLASSES.includes(name));
+    setForm({
+      ...settings,
+      detection: {
+        ...settings.detection,
+        classes: savedDatasetClasses ? selected : [...WASTE_CLASSES],
+        model: MODEL_OPTIONS.includes(settings.detection?.model)
+          ? settings.detection.model
+          : LIVE_MODEL_NAME,
+      },
+      recording: {
+        record_confidence: 0.8,
+        min_confirmation_frames: 3,
+        track_lost_timeout: 3,
+        detection_cooldown: 10,
+        prevent_duplicate: true,
+        ...settings.recording,
+      },
+    });
+    const nextTab =
+      typeof settingsTab === 'string' && TABS.some((t) => t.id === settingsTab)
+        ? settingsTab
+        : 'camera';
+    setTab(nextTab);
+    setTestError('');
+    return undefined;
+  }, [open, settings, settingsLoading, settingsTab]);
 
   const patch = (section, key, value) => {
     setForm((f) => ({
@@ -82,20 +136,55 @@ export default function SettingsModal({ onTestStream }) {
     }));
   };
 
-  const handleTest = () => {
+  const handleTest = async () => {
     setTestError('');
     const url = form.stream?.url?.trim();
     if (!url) {
-      setTestError('Set a camera stream URL before testing.');
+      const msg = 'Set a camera stream URL before testing.';
+      setTestError(msg);
+      await acknowledgeAction({ title: 'Cannot test stream', message: msg, variant: 'warning' });
       return;
     }
-    setStreamStatus('CONNECTING…');
-    onTestStream?.(url, form.stream?.protocol);
+    await confirmThenRun({
+      skipConfirm: true,
+      busyTitle: 'Testing stream',
+      busyMessage: 'Checking the camera stream URL.',
+      busyLabel: 'Testing…',
+      successTitle: 'Test started',
+      successMessage: 'Connection test started.',
+      errorTitle: 'Test failed',
+      work: async () => {
+        setStreamStatus('CONNECTING…');
+        onTestStream?.(url, form.stream?.protocol);
+      },
+    });
   };
 
-  const handleSave = () => {
-    // TODO: POST config to your backend / persist to your store
-    saveSettings(form);
+  const handleSave = async () => {
+    const detectionConf = Math.min(0.98, Math.max(0.8, Number(form.detection?.confidence ?? 0.8)));
+    const reviewConf = Math.min(0.79, Math.max(0.25, Number(form.detection?.review_confidence ?? 0.5)));
+    const recordConf = Math.min(0.98, Math.max(0.8, Number(form.recording?.record_confidence ?? 0.8)));
+    await confirmThenRun({
+      title: 'Save configuration?',
+      message: 'Detection, recording, and station settings will be updated for this station.',
+      confirmLabel: 'Save',
+      busyTitle: 'Saving configuration',
+      busyMessage: 'Updating detection, recording, and station settings.',
+      busyLabel: 'Saving…',
+      successTitle: 'Configuration saved',
+      successMessage: 'Detection, recording, and station settings were updated.',
+      errorTitle: 'Configuration not saved',
+      work: async () => {
+        const ok = await saveSettings({
+          ...form,
+          detection: { ...form.detection, confidence: detectionConf, review_confidence: reviewConf },
+          recording: { ...form.recording, record_confidence: recordConf },
+        });
+        if (!ok) {
+          throw new Error(useSettingsStore.getState().settingsError || 'Could not save settings.');
+        }
+      },
+    });
   };
 
   const toggleClass = (label) => {
@@ -230,7 +319,7 @@ export default function SettingsModal({ onTestStream }) {
                 <button className="test-btn" type="button" onClick={handleTest}>
                   Test connection
                 </button>
-                {testError && <div className="field-error">{testError}</div>}
+                {testError ? <AppNotice type="warning" title="Stream test" message={testError} /> : null}
               </div>
             </div>
           )}
@@ -242,25 +331,42 @@ export default function SettingsModal({ onTestStream }) {
                 <label htmlFor="cfg-model">Detection model</label>
                 <select
                   id="cfg-model"
-                  value={form.detection?.model || ''}
+                  value={
+                    MODEL_OPTIONS.includes(form.detection?.model)
+                      ? form.detection.model
+                      : LIVE_MODEL_NAME
+                  }
                   onChange={(e) => patch('detection', 'model', e.target.value)}
                 >
-                  <option>YOLO-COAST v2.1 (recommended)</option>
-                  <option>YOLO-COAST v1.4</option>
-                  <option>Custom ONNX model…</option>
+                  {MODEL_OPTIONS.map((name) => (
+                    <option key={name}>{name}</option>
+                  ))}
                 </select>
+                <div className="hint">The live camera runs YOLOv11s ONNX · best.onnx</div>
               </div>
               <div className="field">
-                <label htmlFor="cfg-conf">Confidence threshold</label>
+                <label htmlFor="cfg-conf">Detection confidence</label>
                 <RangeField
                   id="cfg-conf"
-                  min={10}
-                  max={95}
-                  value={Math.round((form.detection?.confidence ?? 0.6) * 100)}
-                  format={(v) => (v / 100).toFixed(2)}
+                  min={80}
+                  max={98}
+                  value={Math.round((form.detection?.confidence ?? 0.8) * 100)}
+                  format={(v) => `${v}%`}
                   onChange={(v) => patch('detection', 'confidence', v / 100)}
                 />
-                <div className="hint">Detections below this score are ignored</div>
+                <div className="hint">Only the 13 dataset classes are drawn, from 80% through 98%. Objects outside the dataset go to Detection Reviews.</div>
+              </div>
+              <div className="field">
+                <label htmlFor="cfg-review-conf">Review confidence</label>
+                <RangeField
+                  id="cfg-review-conf"
+                  min={25}
+                  max={79}
+                  value={Math.round((form.detection?.review_confidence ?? 0.5) * 100)}
+                  format={(v) => `${v}%`}
+                  onChange={(v) => patch('detection', 'review_confidence', v / 100)}
+                />
+                <div className="hint">Known-class boxes at or above this score, and below Detection confidence, go to Detection Reviews. They are not saved as live detections.</div>
               </div>
               <div className="field">
                 <label htmlFor="cfg-interval">Inference interval</label>
@@ -302,6 +408,72 @@ export default function SettingsModal({ onTestStream }) {
                   checked={form.detection?.showConfidence !== false}
                   onChange={(v) => patch('detection', 'showConfidence', v)}
                 />
+              </div>
+            </div>
+          )}
+
+          {tab === 'recording' && (
+            <div className="pane active">
+              <h4>Recording conditions</h4>
+              <div className="field">
+                <label htmlFor="cfg-record-conf">Record confidence threshold</label>
+                <RangeField
+                  id="cfg-record-conf"
+                  min={80}
+                  max={98}
+                  value={Math.round((form.recording?.record_confidence ?? 0.8) * 100)}
+                  format={(v) => `${v}%`}
+                  onChange={(v) => patch('recording', 'record_confidence', v / 100)}
+                />
+                <div className="hint">A dataset class is saved only when its score is inside 80–98%.</div>
+              </div>
+              <div className="field">
+                <label htmlFor="cfg-confirm-frames">Minimum confirmation frames</label>
+                <RangeField
+                  id="cfg-confirm-frames"
+                  min={1}
+                  max={10}
+                  value={form.recording?.min_confirmation_frames ?? 3}
+                  format={(v) => `${v} fr`}
+                  onChange={(v) => patch('recording', 'min_confirmation_frames', v)}
+                />
+                <div className="hint">Required consecutive frames before recording.</div>
+              </div>
+              <div className="field">
+                <label htmlFor="cfg-track-timeout">Track lost timeout</label>
+                <RangeField
+                  id="cfg-track-timeout"
+                  min={1}
+                  max={15}
+                  value={form.recording?.track_lost_timeout ?? 3}
+                  format={(v) => `${v}s`}
+                  onChange={(v) => patch('recording', 'track_lost_timeout', v)}
+                />
+                <div className="hint">Time before a lost track is treated as a new tracking event.</div>
+              </div>
+              <div className="switch-row">
+                <div>
+                  <div className="sw-label">Detection cooldown</div>
+                  <div className="sw-sub">Cooldown used by the current recording logic.</div>
+                </div>
+                <span className="range-val">{form.recording?.detection_cooldown ?? 10}s</span>
+              </div>
+              <div className="switch-row">
+                <div>
+                  <div className="sw-label">Prevent duplicate recordings</div>
+                  <div className="sw-sub">Prevents repeated recording of the same tracked object.</div>
+                </div>
+                <Switch
+                  checked={form.recording?.prevent_duplicate !== false}
+                  onChange={(v) => patch('recording', 'prevent_duplicate', v)}
+                />
+              </div>
+              <div className="switch-row">
+                <div>
+                  <div className="sw-label">Save detection snapshots</div>
+                  <div className="sw-sub">Stores an image for confirmed detections. Managed from Station &amp; storage.</div>
+                </div>
+                <span className="range-val">{form.station?.saveSnapshots !== false ? 'ON' : 'OFF'}</span>
               </div>
             </div>
           )}
@@ -349,41 +521,6 @@ export default function SettingsModal({ onTestStream }) {
                   checked={form.alerts?.offlineAlerts !== false}
                   onChange={(v) => patch('alerts', 'offlineAlerts', v)}
                 />
-              </div>
-              <h4>Report delivery</h4>
-              <div className="field">
-                <label htmlFor="cfg-email">Recipient email</label>
-                <input
-                  type="text"
-                  id="cfg-email"
-                  placeholder="coastal-team@example.org"
-                  value={form.alerts?.email || ''}
-                  onChange={(e) => patch('alerts', 'email', e.target.value)}
-                />
-              </div>
-              <div className="field">
-                <label htmlFor="cfg-webhook">Webhook URL (optional)</label>
-                <input
-                  type="text"
-                  id="cfg-webhook"
-                  placeholder="https://hooks.example.org/coastal-alerts"
-                  value={form.alerts?.webhook || ''}
-                  onChange={(e) => patch('alerts', 'webhook', e.target.value)}
-                />
-                <div className="hint">POST JSON payload on every alert event</div>
-              </div>
-              <div className="field">
-                <label htmlFor="cfg-report-freq">Automatic summary report</label>
-                <select
-                  id="cfg-report-freq"
-                  value={form.alerts?.reportFrequency || 'Daily · 06:00'}
-                  onChange={(e) => patch('alerts', 'reportFrequency', e.target.value)}
-                >
-                  <option>Daily · 06:00</option>
-                  <option>Every 12 hours</option>
-                  <option>Weekly · Monday</option>
-                  <option>Off</option>
-                </select>
               </div>
             </div>
           )}
@@ -475,11 +612,21 @@ export default function SettingsModal({ onTestStream }) {
       </div>
 
       <div className="modal-foot">
+        <div className="foot-left">
+          <button className="btn-danger" type="button" onClick={handleLogout}>
+            Log out
+          </button>
+        </div>
         <button className="btn-ghost" type="button" onClick={closeSettings}>
           Cancel
         </button>
-        <button className="btn-save" type="button" onClick={handleSave}>
-          Save configuration
+        <button
+          className="btn-save"
+          type="button"
+          onClick={handleSave}
+          disabled={settingsSaving}
+        >
+          {settingsSaving ? 'Saving…' : 'Save configuration'}
         </button>
       </div>
     </Modal>

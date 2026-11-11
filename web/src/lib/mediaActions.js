@@ -1,5 +1,8 @@
-/** Capture the live video or img inside #viewport as a PNG download. */
-export function captureSnapshot(filenamePrefix = 'tidalwatch') {
+/**
+ * Capture the live video or img inside #viewport as a PNG.
+ * Downloads the file and resolves { filename, dataUrl, blob }.
+ */
+export function captureSnapshot(filenamePrefix = 'brgy-gracia') {
   const root = document.getElementById('viewport');
   if (!root) throw new Error('Viewport not found.');
 
@@ -34,7 +37,14 @@ export function captureSnapshot(filenamePrefix = 'tidalwatch') {
         return;
       }
       downloadBlob(blob, name);
-      resolve(name);
+      const reader = new FileReader();
+      reader.onload = () => {
+        resolve({ filename: name, dataUrl: String(reader.result), blob });
+      };
+      reader.onerror = () => {
+        resolve({ filename: name, dataUrl: URL.createObjectURL(blob), blob });
+      };
+      reader.readAsDataURL(blob);
     }, 'image/png');
   });
 }
@@ -50,9 +60,10 @@ function downloadBlob(blob, filename) {
 
 /**
  * Start recording the live <video> via MediaRecorder.
- * Returns { stop } — call stop() to finish and download the clip.
+ * Returns { stop, done } — call stop() to finish and download the clip.
+ * Auto-stops after maxMs (default 2 minutes).
  */
-export function startClipRecording(maxMs = 30000) {
+export function startClipRecording(filenamePrefix = 'brgy-gracia', maxMs = 120000) {
   const root = document.getElementById('viewport');
   const video = root?.querySelector('.stream-video');
   if (!video || video.style.display === 'none' || video.readyState < 2) {
@@ -66,11 +77,17 @@ export function startClipRecording(maxMs = 30000) {
     ? video.captureStream()
     : video.mozCaptureStream();
 
+  if (!stream?.getVideoTracks?.().length) {
+    throw new Error('Could not capture the live stream. Try again when video is playing.');
+  }
+
   const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
     ? 'video/webm;codecs=vp9'
-    : MediaRecorder.isTypeSupported('video/webm')
-      ? 'video/webm'
-      : '';
+    : MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
+      ? 'video/webm;codecs=vp8'
+      : MediaRecorder.isTypeSupported('video/webm')
+        ? 'video/webm'
+        : '';
 
   const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
   const chunks = [];
@@ -80,13 +97,25 @@ export function startClipRecording(maxMs = 30000) {
   };
 
   let autoTimer = null;
+  let settled = false;
+
   const stopPromise = new Promise((resolve, reject) => {
-    recorder.onerror = () => reject(new Error('Recording failed.'));
+    recorder.onerror = () => {
+      if (settled) return;
+      settled = true;
+      reject(new Error('Recording failed.'));
+    };
     recorder.onstop = () => {
       if (autoTimer) clearTimeout(autoTimer);
+      if (settled) return;
+      settled = true;
       const blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
+      if (!blob.size) {
+        reject(new Error('Recording was empty. Try again.'));
+        return;
+      }
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const name = `tidalwatch-clip-${stamp}.webm`;
+      const name = `${filenamePrefix}-clip-${stamp}.webm`;
       downloadBlob(blob, name);
       resolve(name);
     };

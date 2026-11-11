@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useCameraStore } from '../../stores/useCameraStore';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 import { captureSnapshot, startClipRecording } from '../../lib/mediaActions';
+import { acknowledgeAction, confirmThenRun } from '../../stores/useNoticeStore';
 
 function pad(n) {
   return String(n).padStart(2, '0');
@@ -16,13 +17,6 @@ function formatUptime(ms) {
   return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }
 
-function parseClipMs(clipLength) {
-  if (!clipLength) return 30000;
-  if (/2\s*min/i.test(clipLength)) return 120000;
-  if (/60/.test(clipLength)) return 60000;
-  return 30000;
-}
-
 export default function ControlDeck() {
   const detectionOn = useCameraStore((s) => s.detectionOn);
   const setDetectionOn = useCameraStore((s) => s.setDetectionOn);
@@ -31,111 +25,195 @@ export default function ControlDeck() {
   const latencyMs = useCameraStore((s) => s.latencyMs);
   const gridView = useCameraStore((s) => s.gridView);
   const toggleGridView = useCameraStore((s) => s.toggleGridView);
+  const cameras = useCameraStore((s) => s.cameras);
+  const cycleCamera = useCameraStore((s) => s.cycleCamera);
+  const activeCameraId = useCameraStore((s) => s.activeCameraId);
   const recording = useCameraStore((s) => s.recording);
   const setRecording = useCameraStore((s) => s.setRecording);
-  const deckNotice = useCameraStore((s) => s.deckNotice);
-  const setDeckNotice = useCameraStore((s) => s.setDeckNotice);
-  const activeCameraId = useCameraStore((s) => s.activeCameraId);
-  const clipLength = useSettingsStore((s) => s.settings.station?.clipLength);
+  const canCycle = cameras.length > 1;
 
-  const recorderRef = useRef(null);
   const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState(false);
+  const [togglingDetection, setTogglingDetection] = useState(false);
+  const clipRef = useRef(null);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  useEffect(() => {
-    if (!deckNotice) return undefined;
-    const t = setTimeout(() => setDeckNotice(null), 3200);
-    return () => clearTimeout(t);
-  }, [deckNotice, setDeckNotice]);
-
+  // Stop recording if camera / grid changes or component unmounts
   useEffect(() => {
     return () => {
-      if (recorderRef.current) {
-        recorderRef.current.stop?.();
-        recorderRef.current = null;
+      if (clipRef.current) {
+        try {
+          clipRef.current.stop();
+        } catch {
+          /* ignore */
+        }
+        clipRef.current = null;
       }
+      setRecording(false);
     };
-  }, []);
+  }, [activeCameraId, gridView, setRecording]);
 
-  const clock = new Date(now).toLocaleTimeString('en-GB');
+  const clock = new Date(now).toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  });
   const uptime =
     streamStatus === 'LIVE' && liveSince != null
       ? formatUptime(now - liveSince)
       : '—';
   const latency = latencyMs != null ? `${latencyMs} ms` : '—';
 
-  const notice = (msg) => setDeckNotice(msg);
-
-  const toggleDetect = () => {
+  const toggleDetect = async () => {
+    if (togglingDetection) return;
     const next = !detectionOn;
+    setTogglingDetection(true);
     setDetectionOn(next);
-    notice(next ? 'Detection overlay on' : 'Detection overlay off');
-  };
-
-  const handleSnapshot = async () => {
-    setBusy(true);
-    try {
-      const name = await captureSnapshot(activeCameraId || 'tidalwatch');
-      notice(`Snapshot saved · ${name}`);
-    } catch (err) {
-      notice(err.message || 'Snapshot failed.');
-    } finally {
-      setBusy(false);
-    }
+    const saved = await useSettingsStore.getState().setDetectionEnabled(next);
+    setTogglingDetection(false);
+    if (saved) return;
+    setDetectionOn(!next);
+    await acknowledgeAction({
+      title: 'Detection not changed',
+      message: 'Could not change detection. Try again.',
+      variant: 'danger',
+    });
   };
 
   const handleRecord = async () => {
-    if (recording && recorderRef.current) {
+    if (recording && clipRef.current) {
       setBusy(true);
-      try {
-        const name = await recorderRef.current.stop();
-        recorderRef.current = null;
+      const outcome = await confirmThenRun({
+        title: 'Stop recording?',
+        message: 'The clip will be saved to this station.',
+        confirmLabel: 'Stop and save',
+        busyTitle: 'Saving recording',
+        busyMessage: 'Stopping the clip and saving the file.',
+        busyLabel: 'Saving…',
+        successTitle: 'Recording saved',
+        successMessage: (name) => `Recording saved · ${name}`,
+        errorTitle: 'Recording not saved',
+        work: () => clipRef.current.stop(),
+      });
+      if (!outcome.cancelled) {
+        clipRef.current = null;
         setRecording(false);
-        notice(`Clip saved · ${name}`);
-      } catch (err) {
-        setRecording(false);
-        recorderRef.current = null;
-        notice(err.message || 'Could not save clip.');
-      } finally {
-        setBusy(false);
       }
+      setBusy(false);
+      return;
+    }
+
+    if (gridView) {
+      await acknowledgeAction({
+        title: 'Cannot record',
+        message: 'Switch to single camera view to record.',
+        variant: 'warning',
+      });
+      return;
+    }
+    if (streamStatus !== 'LIVE') {
+      await acknowledgeAction({
+        title: 'Cannot record',
+        message: 'Wait until the stream is LIVE before recording.',
+        variant: 'warning',
+      });
       return;
     }
 
     setBusy(true);
-    try {
-      const session = startClipRecording(parseClipMs(clipLength));
-      recorderRef.current = session;
-      setRecording(true);
-      notice('Recording… click again to stop');
-      session.done
-        .then((name) => {
-          if (recorderRef.current === session) {
-            recorderRef.current = null;
+    const outcome = await confirmThenRun({
+      title: 'Start recording?',
+      message: 'Tap Record again to stop. Maximum 2 minutes.',
+      confirmLabel: 'Start recording',
+      busyTitle: 'Starting recording',
+      busyMessage: 'Starting the clip on the live camera.',
+      busyLabel: 'Starting…',
+      successTitle: 'Recording',
+      successMessage: 'Recording is on. Tap Record again to stop (max 2 min).',
+      errorTitle: 'Recording did not start',
+      work: async () => {
+        const prefix = String(activeCameraId || 'brgy-gracia')
+          .toLowerCase()
+          .replace(/[^a-z0-9-]+/g, '-');
+        const session = startClipRecording(prefix, 120000);
+        clipRef.current = session;
+        setRecording(true);
+        session.done
+          .then(async (name) => {
+            if (clipRef.current !== session) return;
+            clipRef.current = null;
             setRecording(false);
-            notice(`Clip saved · ${name}`);
-          }
-        })
-        .catch((err) => {
-          recorderRef.current = null;
-          setRecording(false);
-          notice(err.message || 'Recording failed.');
-        });
-    } catch (err) {
-      notice(err.message || 'Could not start recording.');
-    } finally {
-      setBusy(false);
+            await acknowledgeAction({
+              title: 'Recording saved',
+              message: `Recording saved · ${name}`,
+            });
+          })
+          .catch(async (err) => {
+            if (clipRef.current !== session) return;
+            clipRef.current = null;
+            setRecording(false);
+            await acknowledgeAction({
+              title: 'Recording failed',
+              message: err.message || 'Recording failed.',
+              variant: 'danger',
+            });
+          });
+      },
+    });
+    if (!outcome.ok) setRecording(false);
+    setBusy(false);
+  };
+
+  const handleSnapshot = async () => {
+    if (gridView) {
+      await acknowledgeAction({
+        title: 'Cannot capture',
+        message: 'Switch to single camera view to capture.',
+        variant: 'warning',
+      });
+      return;
     }
+    if (streamStatus !== 'LIVE') {
+      await acknowledgeAction({
+        title: 'Cannot capture',
+        message: 'Wait until the stream is LIVE before capturing.',
+        variant: 'warning',
+      });
+      return;
+    }
+    setBusy(true);
+    try {
+      const prefix = String(activeCameraId || 'brgy-gracia')
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, '-');
+      await captureSnapshot(prefix);
+    } catch (err) {
+      await acknowledgeAction({
+        title: 'Snapshot not saved',
+        message: err.message || 'Could not capture a still image.',
+        variant: 'danger',
+      });
+    }
+    setBusy(false);
   };
 
   const handleGrid = () => {
     toggleGridView();
-    notice(!gridView ? 'Grid view on' : 'Single camera view');
+  };
+
+  const handlePrevLens = () => {
+    if (!canCycle) return;
+    cycleCamera(-1);
+  };
+
+  const handleNextLens = () => {
+    if (!canCycle) return;
+    cycleCamera(1);
   };
 
   const fullscreen = () => {
@@ -152,12 +230,30 @@ export default function ControlDeck() {
           className={`deck-btn${detectionOn ? ' primary' : ''}`}
           type="button"
           onClick={toggleDetect}
+          disabled={togglingDetection}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <circle cx="12" cy="12" r="3" />
             <path d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2" />
           </svg>
-          {detectionOn ? 'Detection on' : 'Detection off'}
+          {togglingDetection ? 'Saving…' : detectionOn ? 'Detection on' : 'Detection off'}
+        </button>
+        <button
+          className={`deck-btn${recording ? ' recording' : ''}`}
+          type="button"
+          disabled={busy}
+          onClick={handleRecord}
+          aria-pressed={recording}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            {recording ? (
+              <rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" stroke="none" />
+            ) : (
+              <circle cx="12" cy="12" r="6" fill="currentColor" stroke="none" />
+            )}
+            <circle cx="12" cy="12" r="9" />
+          </svg>
+          {recording ? 'Stop' : 'Record'}
         </button>
         <button
           className="deck-btn"
@@ -165,25 +261,37 @@ export default function ControlDeck() {
           disabled={busy}
           onClick={handleSnapshot}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
             <circle cx="12" cy="13" r="4" />
           </svg>
           Snapshot
         </button>
-        <button
-          className={`deck-btn${recording ? ' primary recording' : ''}`}
-          type="button"
-          disabled={busy && !recording}
-          onClick={handleRecord}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <circle cx="12" cy="12" r="9" />
-            <circle cx="12" cy="12" r="4" fill="currentColor" />
-          </svg>
-          {recording ? 'Stop recording' : 'Record clip'}
-        </button>
         <div className="deck-sep" />
+        <button
+          className="deck-btn"
+          type="button"
+          onClick={handlePrevLens}
+          disabled={!canCycle}
+          title="Previous lens"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M15 18l-6-6 6-6" />
+          </svg>
+          Prev
+        </button>
+        <button
+          className="deck-btn"
+          type="button"
+          onClick={handleNextLens}
+          disabled={!canCycle}
+          title="Next lens"
+        >
+          Next
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M9 18l6-6-6-6" />
+          </svg>
+        </button>
         <button
           className={`deck-btn${gridView ? ' primary' : ''}`}
           type="button"
@@ -217,7 +325,6 @@ export default function ControlDeck() {
           LATENCY <b>{latency}</b>
         </span>
       </div>
-      {deckNotice && <div className="deck-notice">{deckNotice}</div>}
     </div>
   );
 }

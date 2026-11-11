@@ -17,7 +17,8 @@ function viaDevProxy(absoluteUrl) {
   try {
     const u = new URL(absoluteUrl, window.location.origin);
     const localGo2 =
-      (u.hostname === '127.0.0.1' || u.hostname === 'localhost') && u.port === '1984';
+      (u.hostname === '127.0.0.1' || u.hostname === 'localhost') &&
+      (u.port === '1984' || u.port === '1990');
     if (localGo2) {
       return `${window.location.origin}/go2rtc${u.pathname}${u.search}`;
     }
@@ -25,6 +26,25 @@ function viaDevProxy(absoluteUrl) {
     /* ignore */
   }
   return absoluteUrl;
+}
+
+/** Still JPEG from the same go2rtc stream, for camera-card previews. */
+export function go2rtcSnapshotUrl(url) {
+  const play = resolvePlayableUrl(url);
+  if (!play || !String(play).includes('/api/stream.mp4')) return null;
+  try {
+    const parsed = new URL(play, 'http://127.0.0.1');
+    const src = parsed.searchParams.get('src');
+    if (!src) return null;
+    parsed.pathname = parsed.pathname.replace('/api/stream.mp4', '/api/frame.jpeg');
+    const path = `${parsed.pathname}${parsed.search}`;
+    if (play.startsWith('http://') || play.startsWith('https://')) {
+      return `${parsed.origin}${path}`;
+    }
+    return path;
+  } catch {
+    return null;
+  }
 }
 
 /** Prefer go2rtc MSE MP4 for browser playback. */

@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Cache;
 
 class SystemSetting extends Model
 {
@@ -35,5 +36,6 @@ class SystemSetting extends Model
             ['key' => 'default'],
             ['value' => $settings],
         );
+        Cache::forget('settings:detection_enabled');
     }
 }

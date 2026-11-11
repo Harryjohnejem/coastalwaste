@@ -3,32 +3,32 @@
    Design tokens
    ============================================================ */
 :root{
-  /* ---- DARK · neutral charcoal (default) ---- */
-  --abyss:      #0A0A0B;   /* deepest background */
-  --deepwater:  #141416;   /* panel base */
-  --shelf:      #1C1C1F;   /* raised surface */
-  --reefline:   #2A2A2E;   /* borders / dividers */
-  --foam:       #F2F2F3;   /* primary text */
-  --mist:       #9A9AA0;   /* secondary text */
-  --lagoon:     #3FD0B6;   /* live / accent teal */
+  /* ---- DARK · navy slate (dashboard) ---- */
+  --abyss:      #0F172A;   /* deepest background */
+  --deepwater:  #1E293B;   /* panel base */
+  --shelf:      #243447;   /* raised surface */
+  --reefline:   #334155;   /* borders / dividers */
+  --foam:       #F1F5F9;   /* primary text */
+  --mist:       #94A3B8;   /* secondary text */
+  --lagoon:     #2DD4BF;   /* live / accent teal */
   --sandbar:    #E4C98F;   /* warm sand accent */
   --coral:      #FF6E61;   /* alert / detection */
   --buoy:       #FFC85C;   /* warning */
-  --inset:      rgba(0,0,0,.35);         /* recessed surfaces (settings tab rail) */
-  --glow-a:     rgba(63,208,182,.06);    /* ambient page glow */
+  --inset:      rgba(15,23,42,.45);      /* recessed surfaces (settings tab rail) */
+  --glow-a:     rgba(45,212,191,.07);    /* ambient page glow */
   --glow-b:     rgba(228,201,143,.04);
   --on-accent:  #04241E;   /* text on teal buttons */
   --on-sand:    #2E2109;   /* text on sand buttons */
 
   /* screen surfaces (viewport, thumbnails, HUD) */
-  --screen:      #050506;              /* viewport backdrop */
-  --screen-line: rgba(242,242,243,.02); /* scanline texture */
-  --thumb-a:     #1A1A1D;              /* thumbnail stripes */
-  --thumb-b:     #121214;
-  --hud-rgb:     10,10,11;             /* HUD gradient base (r,g,b) */
-  --tag-rgb:     20,20,22;             /* overlay tag chips (r,g,b) */
-  --sonar-rgb:   63,208,182;           /* sonar rings & frame ticks (r,g,b) */
-  --backdrop:    rgba(0,0,0,.72);       /* modal backdrop */
+  --screen:      #0B1220;              /* viewport backdrop */
+  --screen-line: rgba(241,245,249,.03); /* scanline texture */
+  --thumb-a:     #1E293B;              /* thumbnail stripes */
+  --thumb-b:     #162032;
+  --hud-rgb:     15,23,42;             /* HUD gradient base (r,g,b) */
+  --tag-rgb:     30,41,59;             /* overlay tag chips (r,g,b) */
+  --sonar-rgb:   45,212,191;           /* sonar rings & frame ticks (r,g,b) */
+  --backdrop:    rgba(15,23,42,.78);    /* modal backdrop */
 
   --radius-lg: 18px;
   --radius-md: 12px;
@@ -37,7 +37,7 @@
   --font-display: 'Sora', sans-serif;
   --font-mono: 'IBM Plex Mono', monospace;
 
-  --shadow-panel: 0 18px 40px -18px rgba(0,0,0,.55);
+  --shadow-panel: 0 18px 40px -18px rgba(15,23,42,.65);
 }
 
 /* ---- LIGHT · "Daylight survey" ---- */

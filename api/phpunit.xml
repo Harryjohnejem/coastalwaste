@@ -32,5 +32,9 @@
         <env name="PULSE_ENABLED" value="false"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>
+        <env name="ROBOFLOW_API_KEY" value="test-roboflow-key"/>
+        <env name="ROBOFLOW_WORKSPACE" value="test-workspace"/>
+        <env name="ROBOFLOW_PROJECT" value="test-project"/>
+        <env name="ROBOFLOW_MODEL_TYPE" value="yolov11"/>
     </php>
 </phpunit>

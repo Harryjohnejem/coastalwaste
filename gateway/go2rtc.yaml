@@ -1,7 +1,19 @@
-# Tapo C-series RTSP → browser HLS/WebRTC via go2rtc
-streams:
-  cam01: rtsp://camera_costal:password_costal@192.168.1.61:554/stream1
-
 api:
-  listen: ":1984"
-  origin: "*"
+    listen: ":1990"
+    origin: "*"
+
+streams:
+    # Tapo C545D dual lens — ${TAPO_*} and ${TAPO2_*} come from gateway/.env
+    # Start with ./start.sh (not go2rtc.exe alone) or URLs stay literal ${...}
+    # First camera: cam01 = wide-angle (/stream1), cam02 = telephoto (/stream6)
+    cam01: rtsp://${TAPO_RTSP_USER}:${TAPO_RTSP_PASS}@${TAPO_HOST}:554/stream1
+    cam02: rtsp://${TAPO_RTSP_USER}:${TAPO_RTSP_PASS}@${TAPO_HOST}:554/stream6
+    # Second camera (Paco). Own Camera Account — do not reuse TAPO_* credentials.
+    cam03: rtsp://${TAPO2_RTSP_USER}:${TAPO2_RTSP_PASS}@${TAPO2_HOST}:554/stream1
+    cam04: rtsp://${TAPO2_RTSP_USER}:${TAPO2_RTSP_PASS}@${TAPO2_HOST}:554/stream6
+
+webrtc:
+    listen: ":8560"
+
+rtsp:
+    listen: ":8561"

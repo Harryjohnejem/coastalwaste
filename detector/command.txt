@@ -1,0 +1,6 @@
+# Free port 8092 if an old detector is still running (avoids WinError 10048).
+# Git Bash / MINGW:
+pid=$(netstat -ano | grep '127.0.0.1:8092' | grep LISTENING | awk '{print $5}' | head -1)
+[ -n "$pid" ] && taskkill //PID "$pid" //F
+cd detector
+python app.py
