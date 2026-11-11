@@ -1,0 +1,138 @@
+%% Logical ERD — Computer Vision-Based Coastal Waste Monitoring and Reporting System
+%% Paco Beach, Barangay Gracia
+%% Matches implemented MySQL schema (3NF). Omit Laravel tables: cache, sessions, tokens, migrations.
+%% diagrams.net: Insert → Advanced → Mermaid → paste this file.
+
+erDiagram
+    users ||--o{ reports : "generates"
+    users ||--o{ notifications : "receives"
+    cameras ||--o{ detections : "captures"
+    cameras ||--o{ waste_quotas : "may scope"
+    waste_categories ||--|{ waste_classifications : "has"
+    waste_categories ||--o{ waste_quotas : "may scope"
+    waste_classifications ||--o{ detections : "classifies"
+    detections ||--o{ detection_images : "has"
+    detections ||--o{ detection_logs : "has"
+
+    users {
+        bigint id PK
+        varchar name
+        varchar email UK
+        varchar password
+        varchar role
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    cameras {
+        bigint id PK
+        varchar camera_code UK
+        varchar camera_name
+        varchar monitoring_location
+        varchar ip_address
+        enum status
+        timestamp last_seen
+        varchar stream_url
+        varchar protocol
+        varchar resolution
+        varchar fps
+        boolean detection_enabled
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    waste_categories {
+        bigint id PK
+        varchar category_name UK
+        text description
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    waste_classifications {
+        bigint id PK
+        bigint category_id FK
+        varchar waste_type
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    detections {
+        bigint id PK
+        bigint camera_id FK
+        bigint classification_id FK
+        decimal confidence
+        int quantity
+        varchar location
+        datetime detected_at
+        enum status
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    detection_images {
+        bigint id PK
+        bigint detection_id FK
+        varchar image_path
+        varchar image_name
+        datetime captured_at
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    detection_logs {
+        bigint id PK
+        bigint detection_id FK
+        bigint frame_number
+        varchar model_name
+        varchar model_version
+        varchar raw_label
+        decimal confidence
+        int processing_time_ms
+        timestamp created_at
+    }
+
+    waste_quotas {
+        bigint id PK
+        varchar name
+        bigint camera_id FK "nullable"
+        bigint category_id FK "nullable"
+        int quota_limit
+        enum period
+        text cleanup_recommendation
+        boolean is_active
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    reports {
+        bigint id PK
+        varchar report_number UK
+        enum report_type
+        bigint generated_by FK
+        varchar monitoring_period
+        decimal average_confidence
+        datetime generated_at
+        text remarks
+        text recommendations
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    notifications {
+        bigint id PK
+        bigint user_id FK
+        varchar title
+        text message
+        enum type
+        boolean is_read
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    system_settings {
+        varchar key PK
+        json value
+        timestamp created_at
+        timestamp updated_at
+    }

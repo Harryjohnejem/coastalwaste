@@ -1,0 +1,16 @@
+# Copy to go2rtc.yaml and replace USER, PASS, and CAMERA_IP.
+# go2rtc.yaml is gitignored — it holds the real RTSP URL.
+
+api:
+    listen: ":1990"
+    origin: "*"
+
+streams:
+    # #media=video copies H264 only (no transcode) and drops audio.
+    cam01: rtsp://USER:PASS@CAMERA_IP:554/stream1#media=video
+
+webrtc:
+    listen: ":8560"
+
+rtsp:
+    listen: ":8561"

@@ -186,6 +186,7 @@ export default function Viewport() {
   const setGridView = useCameraStore((s) => s.setGridView);
   const settings = useSettingsStore((s) => s.settings);
   const openSettings = useSettingsStore((s) => s.openSettings);
+  const token = useAuthStore((s) => s.token);
 
   const conf = Math.max(
     0.8,

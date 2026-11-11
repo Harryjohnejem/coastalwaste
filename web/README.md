@@ -1,6 +1,7 @@
-# TidalWatch — Coastal Waste Monitoring (Frontend)
+# Coastal waste dashboard (React + Vite)
 
-React 18 + Vite frontend for the Computer Vision-Based Coastal Waste Monitoring and Reporting System. Layout, colors, and interactions are ported from `coastal-waste-monitor-template.html`.
+Operator UI for the Computer Vision-Based Coastal Waste Monitoring and Reporting System.
+Modules follow the side menu: live stage, detections, cameras, reports.
 
 ## Quick start
 
@@ -11,6 +12,7 @@ npm install
 npm run dev
 ```
 
+Set `VITE_DEMO_EMAIL` and `VITE_DEMO_PASSWORD` to the user in `api/database/seeders/AdminUserSeeder.php`.
 Open the URL Vite prints (usually `http://localhost:5173`).
 
 ## Environment
@@ -18,51 +20,21 @@ Open the URL Vite prints (usually `http://localhost:5173`).
 | Variable | Description |
 |----------|-------------|
 | `VITE_API_URL` | Laravel API base, including `/api` (default `http://localhost:8000/api`) |
-| `VITE_AUTH_REQUIRED` | Set to `true` to require Sanctum login before the dashboard. Default is off so the UI stays usable while the API skeleton has no `/login`. |
+| `VITE_DETECTOR_OVERLAY_URL` | Detector overlay endpoint (default `http://127.0.0.1:8092/overlay`) |
+| `VITE_DEMO_EMAIL` / `VITE_DEMO_PASSWORD` | Auto-login when no token is stored |
 
 ## Auth (Sanctum bearer)
 
 - Login page: `/login` → `POST /login` → `{ token, user }`
 - Token stored in Zustand + `localStorage` (`tidalwatch-auth`)
 - Axios attaches `Authorization: Bearer <token>`; `401` clears auth and redirects to `/login`
-- Dashboard auto-signs in with demo credentials when no token is stored (see `.env` `VITE_DEMO_*`)
+- Dashboard auto-signs in with `VITE_DEMO_*` when no token is stored
 
-**Demo credentials:** `operator@tidalwatch.test` / `password`
+## Live camera
 
-To remove auth in one commit, delete:
-
-- `src/pages/Login.jsx`
-- `src/stores/useAuthStore.js`
-- `src/api/auth.js`
-- `src/components/common/RequireAuth.jsx`
-- Bearer / 401 logic in `src/api/client.js`
-- Login route + `RequireAuth` wrapper in `src/App.jsx`
-
-## RTSP gateway
-
-Browsers cannot play raw RTSP. Point cameras at an HLS (`.m3u8`) or WebRTC output from a gateway such as:
-
-**MediaMTX** — ingest RTSP, publish HLS path, set the camera `stream_url` to the HLS playlist.
-
-**go2rtc** — add the RTSP source, use its HLS or WebRTC endpoint in the camera settings.
-
-Until a playable URL is configured, the viewport shows the sonar “Awaiting camera signal” state with a gateway hint for RTSP sources.
-
-## Polling
-
-`/detections` and `/stats/today` refresh every **15 seconds** (`POLL_INTERVAL_MS` in `src/constants.js`).
-
-```js
-// TODO: replace polling with Laravel WebSockets/Reverb or Pusher
-```
-
-## Suggested API additions
-
-The Laravel API in `../api` implements all endpoints the UI expects. Future enhancements:
-
-- WebSockets/Reverb for live detections instead of polling
-- Bounding-box overlay payloads on detections or a dedicated stream endpoint
-- Real CV pipeline integration for camera inference stats
+Raw Tapo RTSP is not playable in the browser. `gateway/` (go2rtc) restreams `cam01` as WebRTC.
+The detector overlay is polled from `VITE_DETECTOR_OVERLAY_URL`.
+Detection log and stats refresh every **5 seconds** (`POLL_INTERVAL_MS` in `src/constants.js`).
 
 ## Scripts
 

@@ -1758,6 +1758,15 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                 _stop.wait(0.01)
                 continue
 
+            vis = frame
+            h, w = vis.shape[:2]
+            if w > 960:
+                vis = cv2.resize(vis, (960, int(h * 960 / w)))
+            ok, buf = cv2.imencode(".jpg", vis, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+            if ok:
+                with _lock:
+                    _state["last_jpeg"] = buf.tobytes()
+
             try:
                 t_infer0 = time.perf_counter()
                 # YOLO searches at proposal_conf (recall). HUD still hides scores
@@ -2759,6 +2768,49 @@ def debug(camera_id: str | None = None):
         "error": error,
         "streams": list(_stream_states.keys()),
     }
+
+
+@app.get("/datasets")
+def datasets():
+    catalog, _classes = load_dataset_catalog()
+    return {"count": len(catalog), "catalog": catalog}
+
+
+@app.get("/frame.jpeg")
+def frame_jpeg():
+    with _lock:
+        data = _state.get("last_jpeg")
+    if not data:
+        return Response(status_code=503)
+    return Response(
+        content=data,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store, no-cache"},
+    )
+
+
+def _mjpeg_bytes():
+    while not _stop.is_set():
+        with _lock:
+            data = _state.get("last_jpeg")
+        if data:
+            yield (
+                b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                + str(len(data)).encode("ascii")
+                + b"\r\n\r\n"
+                + data
+                + b"\r\n"
+            )
+        time.sleep(0.12)
+
+
+@app.get("/stream.mjpeg")
+def stream_mjpeg():
+    return StreamingResponse(
+        _mjpeg_bytes(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store, no-cache"},
+    )
 
 
 @app.get("/overlay")

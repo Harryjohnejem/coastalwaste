@@ -231,6 +231,61 @@ class StatsController extends Controller
         return response()->json($payload);
     }
 
+    public function trends(): JsonResponse
+    {
+        $today = Carbon::today()->endOfDay();
+
+        $daily = [];
+        for ($i = 6; $i >= 0; $i--) {
+            $day = Carbon::today()->subDays($i);
+            $daily[] = [
+                'label' => $day->format('D'),
+                'value' => $this->countBetween($day->copy()->startOfDay(), $day->copy()->endOfDay()),
+            ];
+        }
+
+        $weekly = [];
+        for ($i = 3; $i >= 0; $i--) {
+            $start = Carbon::today()->startOfWeek(Carbon::MONDAY)->subWeeks($i);
+            $end = $start->copy()->endOfWeek(Carbon::SUNDAY);
+            if ($end->gt($today)) {
+                $end = $today->copy();
+            }
+            $weekly[] = [
+                'label' => 'W'.(4 - $i),
+                'value' => $this->countBetween($start, $end),
+            ];
+        }
+
+        $monthly = [];
+        for ($i = 5; $i >= 0; $i--) {
+            $month = Carbon::today()->startOfMonth()->subMonths($i);
+            $start = $month->copy()->startOfMonth();
+            $end = $month->copy()->endOfMonth();
+            if ($end->gt($today)) {
+                $end = $today->copy();
+            }
+            $monthly[] = [
+                'label' => $month->format('M'),
+                'value' => $this->countBetween($start, $end),
+            ];
+        }
+
+        return response()->json([
+            'daily' => $daily,
+            'weekly' => $weekly,
+            'monthly' => $monthly,
+        ]);
+    }
+
+    private function countBetween(Carbon $from, Carbon $to): int
+    {
+        return (int) Detection::query()
+            ->where('detected_at', '>=', $from)
+            ->where('detected_at', '<=', $to)
+            ->sum('quantity');
+    }
+
     private function percentDelta(int $current, int $previous): int
     {
         if ($previous === 0) {

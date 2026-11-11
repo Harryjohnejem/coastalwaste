@@ -12,10 +12,11 @@ the browser. Start go2rtc with `gateway/start.sh` so `${TAPO_*}` expands.
 
 ## Setup
 
-Install **Python 3.10+** from https://www.python.org/downloads/ (enable “Add to PATH”).
+Install **Python 3.10+**. Then:
 
 ```bash
 cd detector
+cp .env.example .env
 python -m venv .venv
 
 # Windows
@@ -27,13 +28,13 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-First run downloads `yolov8s-worldv2.pt` (~50MB+).
+First run loads `yolov8s-worldv2.pt` (not committed; Ultralytics downloads it).
+`DETECTOR_KEY` in `.env` must match `api/.env`.
 
-## Run (with go2rtc + API already up)
+## Run (gateway + API already up)
 
 ```bash
 python app.py
-# or: uvicorn app:app --host 127.0.0.1 --port 8090
 ```
 
 Health: http://127.0.0.1:8092/health
@@ -65,7 +66,7 @@ python bench_detect.py
 python eval_detect.py
 ```
 
-## Env
+## Train locally from Roboflow annotations
 
 See `.env` — `DETECTOR_KEY` must match `DETECTOR_KEY` in `api/.env`.
 

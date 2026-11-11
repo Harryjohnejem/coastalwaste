@@ -1,0 +1,134 @@
+%% Class Diagram — implemented Laravel models / dashboard modules
+%% diagrams.net: Insert → Advanced → Mermaid → paste this file.
+
+classDiagram
+    class User {
+        +id
+        +name
+        +email
+        +password
+        +role
+        +login()
+        +logout()
+    }
+
+    class Camera {
+        +id
+        +camera_code
+        +camera_name
+        +monitoring_location
+        +ip_address
+        +status
+        +last_seen
+        +stream_url
+        +protocol
+        +detection_enabled
+        +addCamera()
+        +editCamera()
+        +deleteCamera()
+        +checkStatus()
+    }
+
+    class WasteCategory {
+        +id
+        +category_name
+        +description
+    }
+
+    class WasteClassification {
+        +id
+        +category_id
+        +waste_type
+        +resolveFromLabel()
+    }
+
+    class Detection {
+        +id
+        +camera_id
+        +classification_id
+        +confidence
+        +quantity
+        +location
+        +detected_at
+        +status
+        +saveDetection()
+        +listDetections()
+    }
+
+    class DetectionImage {
+        +id
+        +detection_id
+        +image_path
+        +image_name
+        +captured_at
+        +saveImage()
+    }
+
+    class DetectionLog {
+        +id
+        +detection_id
+        +frame_number
+        +model_name
+        +raw_label
+        +confidence
+        +processing_time_ms
+        +recordLog()
+    }
+
+    class WasteQuota {
+        +id
+        +name
+        +camera_id
+        +category_id
+        +quota_limit
+        +period
+        +cleanup_recommendation
+        +is_active
+        +currentCount()
+        +checkQuota()
+        +triggerAlert()
+    }
+
+    class Notification {
+        +id
+        +user_id
+        +title
+        +message
+        +type
+        +is_read
+        +createNotification()
+        +markAsRead()
+    }
+
+    class Report {
+        +id
+        +report_number
+        +report_type
+        +generated_by
+        +monitoring_period
+        +average_confidence
+        +generated_at
+        +remarks
+        +recommendations
+        +generateReport()
+        +exportCsvPdf()
+    }
+
+    class SystemSetting {
+        +key
+        +value
+        +getSettings()
+        +saveSettings()
+    }
+
+    Camera "1" --> "0..*" Detection : captures
+    WasteCategory "1" --> "1..*" WasteClassification : has
+    WasteClassification "1" --> "0..*" Detection : classifies
+    Detection "1" --> "0..*" DetectionImage : has
+    Detection "1" --> "0..*" DetectionLog : has
+    User "1" --> "0..*" Report : generates
+    User "1" --> "0..*" Notification : receives
+    Camera "0..1" --> "0..*" WasteQuota : scopes
+    WasteCategory "0..1" --> "0..*" WasteQuota : scopes
+    WasteQuota --> Notification : alerts when reached
+    SystemSetting --> WasteQuota : stores related config

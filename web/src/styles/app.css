@@ -821,6 +821,9 @@ body{
   font-family:inherit;font-size:12.5px;font-weight:600;cursor:pointer;
 }
 .btn-save:hover{filter:brightness(1.08)}
+.btn-save:disabled,.btn-ghost:disabled,.btn-danger:disabled,.test-btn:disabled{
+  opacity:.55;cursor:not-allowed;filter:none;
+}
 .test-btn{
   padding:10px 16px;border-radius:var(--radius-sm);
   border:1px solid var(--lagoon);background:none;color:var(--lagoon);

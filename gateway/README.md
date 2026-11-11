@@ -1,6 +1,6 @@
 # Tapo camera gateway (go2rtc)
 
-Browsers cannot play Tapo RTSP directly. This gateway restreams:
+Browsers cannot play Tapo RTSP directly. This service restreams:
 
 `rtsp://…@CAMERA_IP:554/stream1` → `http://127.0.0.1:1990/api/stream.mp4?src=cam01`
 
@@ -32,6 +32,8 @@ Do not put secrets in `go2rtc.yaml`.
 
 ## Start
 
+Download `go2rtc.exe` from the [go2rtc releases](https://github.com/AlexxIT/go2rtc/releases) into this folder (do not commit the binary).
+
 ```bash
 cd gateway
 ./start.sh
@@ -41,7 +43,7 @@ cd gateway
 
 Or follow `command.txt`. With Docker Desktop: `docker compose up -d`
 
-## UI
+## Tapo app
 
 Laravel cameras should point at go2rtc, not at the Tapo RTSP URL:
 

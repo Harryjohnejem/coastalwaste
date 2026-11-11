@@ -51,6 +51,28 @@ export function overlayMetaFromPayload(data, cameraId) {
   };
 }
 
+const DETECTOR_OVERLAY_URL =
+  import.meta.env.VITE_DETECTOR_OVERLAY_URL || 'http://127.0.0.1:8092/overlay';
+
+async function fetchOverlay(cameraId) {
+  try {
+    const res = await fetch(DETECTOR_OVERLAY_URL, {
+      signal: AbortSignal.timeout(600),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && Array.isArray(data.boxes)) return data;
+    }
+  } catch {
+    /* detector not running — do not hit Vite /overlay (that spams ECONNREFUSED) */
+  }
+  try {
+    return await detectionsApi.getLiveOverlay(cameraId);
+  } catch {
+    return { boxes: [] };
+  }
+}
+
 /**
  * Local overlay poll for one camera (grid tiles). Does not touch the
  * active-camera store, so CAM-01 and CAM-02 never share boxes.
