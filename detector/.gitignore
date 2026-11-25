@@ -1,10 +1,10 @@
-datasets/
-runs/
-weights/roboflow/
-weights/trained/
-weights/clip/
-_diag/
-*.zip
-__pycache__/
-.venv/
-.env
+# datasets/
+# runs/
+# weights/roboflow/
+# weights/trained/
+# weights/clip/
+# _diag/
+# *.zip
+# __pycache__/
+# .venv/
+# .env 

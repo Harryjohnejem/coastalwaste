@@ -18,9 +18,9 @@ __pycache__/
 
 # Detector weights and training output (download / train locally)
 *.pt
-detector/datasets/
-detector/runs/
-detector/weights/
+# detector/datasets/
+# detector/runs/
+# detector/weights/
 
 # Local binaries (download go2rtc from its releases page)
 *.exe
