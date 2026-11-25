@@ -27,8 +27,9 @@ export default function SummaryCards() {
     <div className="stat-row">
       <StatCard label="Total Detections" value={show(stats?.total_detections)} />
       <StatCard label="Today's Detections" value={show(stats?.detections)} />
-      <StatCard label="Active" value={show(stats?.present)} />
-      <StatCard label="Confirmed Clean" value={show(stats?.confirmed_cleaned)} />
+      <StatCard label="Still Present" value={show(stats?.present)} />
+      <StatCard label="No Longer Visible" value={show(stats?.no_longer_visible)} />
+      <StatCard label="Cleaning Verified" value={show(stats?.cleaning_verified)} />
     </div>
   );
 }

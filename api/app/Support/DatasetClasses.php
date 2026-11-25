@@ -2,7 +2,7 @@
 
 namespace App\Support;
 
-/** The 13 classes in the live YOLOv11n model (weights 4), in model order. */
+/** The classes in the live YOLOv11l model (weights 10), in model order. */
 class DatasetClasses
 {
     public const NAMES = [
@@ -13,15 +13,17 @@ class DatasetClasses
         'Glass Bottle',
         'Paper Bag',
         'Paper Drink Carton',
+        'Plastic Bag',
         'Plastic Bottle',
         'Plastic Cellophane',
         'Plastic Cup',
+        'Plastic Spoon',
         'Plastic Wrapper',
         'Styro Cup',
         'Styrofoam',
     ];
 
-    public const CATEGORIES = ['Plastic', 'Paper', 'Metal', 'Glass'];
+    public const CATEGORIES = ['Plastic', 'Metal', 'Glass'];
 
     /** Official classification → parent category. */
     public const CATEGORY_OF = [
@@ -31,6 +33,7 @@ class DatasetClasses
         'Plastic Bottle' => 'Plastic',
         'Plastic Cellophane' => 'Plastic',
         'Plastic Cup' => 'Plastic',
+        'Plastic Spoon' => 'Plastic',
         'Plastic Wrapper' => 'Plastic',
         'Styro Cup' => 'Plastic',
         'Styrofoam' => 'Plastic',
@@ -41,7 +44,14 @@ class DatasetClasses
         'Glass Bottle' => 'Glass',
     ];
 
+    /** Any known class: the original dataset, the deployed model, and the waste catalog. */
     public static function match(?string $label): ?string
+    {
+        return self::matchBase($label) ?? ClassRegistry::match($label);
+    }
+
+    /** Only the original dataset classes. */
+    public static function matchBase(?string $label): ?string
     {
         $label = trim((string) $label);
         foreach (self::NAMES as $name) {
@@ -55,9 +65,13 @@ class DatasetClasses
 
     public static function categoryOf(?string $label): ?string
     {
-        $name = self::match($label);
+        $name = self::matchBase($label);
         if ($name) {
             return self::CATEGORY_OF[$name] ?? null;
+        }
+        $registry = ClassRegistry::categoryOf($label);
+        if ($registry !== null) {
+            return $registry;
         }
         foreach (self::CATEGORY_OF as $known => $category) {
             if (strcasecmp($known, trim((string) $label)) === 0) {

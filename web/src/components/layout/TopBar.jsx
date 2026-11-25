@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { useThemeStore } from '../../stores/useThemeStore';
+import ModeSwitch from '../common/ModeSwitch';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 import { useCameraStore } from '../../stores/useCameraStore';
 import { useNavStore } from '../../stores/useNavStore';
 import { useAuthStore } from '../../stores/useAuthStore';
+import { FLASH_CLEANUP_KEY, useFocusStore } from '../../stores/useFocusStore';
+import { usePageSwitchStore } from '../../stores/usePageSwitchStore';
 import { locationOf } from '../../lib/wasteFilters';
 import * as notificationsApi from '../../api/notifications';
 import usePageVisible from '../../hooks/usePageVisible';
@@ -30,9 +32,8 @@ function formatWhen(iso) {
 
 export default function TopBar() {
   const pageVisible = usePageVisible();
-  const theme = useThemeStore((s) => s.theme);
-  const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const openSettings = useSettingsStore((s) => s.openSettings);
+  const stationName = useSettingsStore((s) => s.settings?.station?.name) || 'Brgy. Gracia';
   const token = useAuthStore((s) => s.token);
   const cameras = useCameraStore((s) => s.cameras);
   const activeCameraId = useCameraStore((s) => s.activeCameraId);
@@ -137,6 +138,36 @@ export default function TopBar() {
     loadNotes();
   };
 
+  /** Where a notification leads: a detection record, or the cleanup threshold. */
+  const targetOf = (note) => {
+    if (note?.detection_id) return 'detection';
+    if (/^(Cleanup needed|Waste building up|Back to normal|Cleaned) ·/.test(String(note?.title || ''))) return 'cleanup';
+    return null;
+  };
+
+  const openNote = (note) => {
+    onMarkRead(note);
+    const target = targetOf(note);
+    if (!target) return;
+    setAlertsOpen(false);
+    if (target === 'detection') {
+      useFocusStore.getState().focusDetection(note.detection_id);
+      setModule('detections');
+      return;
+    }
+    const isAdmin = String(useAuthStore.getState().user?.role || '').toLowerCase() === 'admin';
+    if (isAdmin) {
+      try {
+        sessionStorage.setItem(FLASH_CLEANUP_KEY, '1');
+      } catch {
+        /* the card still shows; it just is not highlighted */
+      }
+      usePageSwitchStore.getState().start('/today', 'Loading Main Dashboard…');
+    } else {
+      setModule('live');
+    }
+  };
+
   const onMarkRead = async (note) => {
     if (note.is_read) return;
     setNotes((rows) => rows.map((n) => (n.id === note.id ? { ...n, is_read: true } : n)));
@@ -171,7 +202,7 @@ export default function TopBar() {
           <img src="/brgy-gracia-seal.jpg" alt="" />
         </div>
         <div>
-          <div className="brand-name">Brgy. Gracia</div>
+          <div className="brand-name">{stationName}</div>
           <div className="brand-sub">Coastal Waste Monitoring and Reporting</div>
         </div>
       </div>
@@ -195,7 +226,7 @@ export default function TopBar() {
           <div className="topbar-location-text">
             <span className="topbar-location-label">Camera location</span>
             <span className="topbar-location-value">
-              {activeCamera?.id ? `${activeCamera.id} · ${cameraLocation}` : cameraLocation}
+              {activeCamera?.name || activeCamera?.id || cameraLocation}
             </span>
           </div>
           <span className="topbar-location-chev" aria-hidden="true">▼</span>
@@ -206,24 +237,28 @@ export default function TopBar() {
             {cameras.length === 0 && (
               <li className="topbar-cam-empty">No cameras available</li>
             )}
-            {cameras.map((cam) => {
-              const loc = locationOf({ location: cam.location, sector: cam.sector });
-              const active = cam.id === activeCameraId;
+            {cameras.map((camera) => {
+              const loc = locationOf({ location: camera.location, sector: camera.sector });
+              const named = camera.name && camera.name !== camera.id
+                ? camera.name.replace(new RegExp(`^${camera.id}\\s*·\\s*`, 'i'), '')
+                : loc;
+              const active = camera.id === activeCameraId;
+              const online = isOnline(camera);
               return (
-                <li key={cam.id}>
+                <li key={camera.id}>
                   <button
                     type="button"
                     role="option"
                     aria-selected={active}
                     className={`topbar-cam-option${active ? ' active' : ''}`}
-                    onClick={() => selectCamera(cam.id)}
+                    onClick={() => selectCamera(camera.id)}
                   >
                     <span className="topbar-cam-option-main">
-                      <b>{cam.id}</b>
-                      <span>{loc}</span>
+                      <b>{camera.id}</b>
+                      <span>{named}</span>
                     </span>
-                    <span className={`topbar-cam-status ${isOnline(cam) ? 'on' : 'off'}`}>
-                      {isOnline(cam) ? 'LIVE' : 'OFF'}
+                    <span className={`topbar-cam-status ${online ? 'on' : 'off'}`}>
+                      {online ? 'LIVE' : 'OFF'}
                     </span>
                   </button>
                 </li>
@@ -240,25 +275,7 @@ export default function TopBar() {
         <span style={{ color: 'var(--foam)' }}>{clock.time}</span>
       </div>
 
-      <button
-        className="icon-btn"
-        type="button"
-        title="Toggle light / dark mode"
-        aria-label="Toggle light or dark mode"
-        aria-pressed={theme === 'light'}
-        onClick={toggleTheme}
-      >
-        {theme === 'dark' ? (
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />
-          </svg>
-        ) : (
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <circle cx="12" cy="12" r="4" />
-            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
-          </svg>
-        )}
-      </button>
+      <ModeSwitch />
 
       <div className="topbar-alerts-wrap" ref={alertsRef}>
         <button
@@ -303,11 +320,14 @@ export default function TopBar() {
                   <button
                     type="button"
                     className={`notif-item${note.is_read ? '' : ' unread'} type-${note.type || 'info'}`}
-                    onClick={() => onMarkRead(note)}
+                    onClick={() => openNote(note)}
                   >
                     <span className="notif-item-title">{note.title}</span>
                     <span className="notif-item-msg">{note.message}</span>
-                    <span className="notif-item-time">{formatWhen(note.created_at)}</span>
+                    <span className="notif-item-time">
+                      {formatWhen(note.created_at)}
+                      {targetOf(note) ? <span className="notif-item-go">View →</span> : null}
+                    </span>
                   </button>
                 </li>
               ))}

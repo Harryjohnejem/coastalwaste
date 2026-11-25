@@ -53,12 +53,15 @@ export function resolvePlayableUrl(url) {
   try {
     const u = new URL(url, window.location.origin);
     const src = u.searchParams.get('src');
-    if (
+    const isStream =
       src &&
-      (u.pathname.includes('/api/stream.m3u8') || u.pathname.includes('/api/stream.mp4'))
-    ) {
-      const mse = `${u.origin}/api/stream.mp4?src=${encodeURIComponent(src)}`;
-      return viaDevProxy(mse);
+      (u.pathname.includes('/api/stream.m3u8') || u.pathname.includes('/api/stream.mp4'));
+    if (isStream) {
+      const msePath = `/api/stream.mp4?src=${encodeURIComponent(src)}`;
+      // Already on the Vite proxy. Rebuilding from the page origin drops /go2rtc
+      // and the second camera is requested from the API, which has no video.
+      if (u.pathname.startsWith('/go2rtc/')) return `/go2rtc${msePath}`;
+      return viaDevProxy(`${u.origin}${msePath}`);
     }
   } catch {
     /* ignore */

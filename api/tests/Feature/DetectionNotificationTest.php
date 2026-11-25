@@ -17,6 +17,31 @@ class DetectionNotificationTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // These tests cover the per-detection notice, which is off by default.
+        SystemSetting::saveDefault(['detection' => ['enabled' => true], 'alerts' => ['detectionAlerts' => true]]);
+    }
+
+    public function test_no_notice_per_detection_when_the_setting_is_off(): void
+    {
+        SystemSetting::saveDefault(['detection' => ['enabled' => true], 'alerts' => ['detectionAlerts' => false]]);
+        $this->admin();
+        $this->camera();
+        $this->classification();
+
+        $this->withHeader('X-Detector-Key', 'tidalwatch-detector-local')
+            ->postJson('/api/detections/live', [
+                'camera_id' => 'CAM-01',
+                'detections' => [['class' => 'Plastic Bottle', 'confidence' => 0.9, 'left' => 10, 'top' => 10, 'width' => 10, 'height' => 10]],
+            ])
+            ->assertOk()
+            ->assertJsonPath('logged', 1);
+
+        $this->assertSame(0, \App\Models\Notification::query()->count());
+    }
+
     private function camera(): Camera
     {
         return Camera::query()->create([
@@ -154,7 +179,7 @@ class DetectionNotificationTest extends TestCase
                 'detections' => [],
                 'status_updates' => [[
                     'detection_id' => $detection->id,
-                    'status' => 'Confirmed Cleaned',
+                    'status' => 'No Longer Visible',
                     'reason' => 'inferred_disappearance',
                 ]],
             ])

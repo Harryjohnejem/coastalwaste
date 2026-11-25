@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
 import { RTSP_GATEWAY_MESSAGE } from '../../constants';
-import { resolvePlayableUrl } from '../../lib/streamUrl';
+import { go2rtcSnapshotUrl, resolvePlayableUrl } from '../../lib/streamUrl';
 import { catchUpLive, go2rtcSrcFromUrl, playGo2rtcWebRtc } from '../../lib/go2rtcLive';
 
 function isMjpeg(url) {
@@ -15,6 +15,17 @@ function isHls(url) {
 function isRtsp(url, protocol) {
   const p = (protocol || '').toUpperCase();
   return p.includes('RTSP') || /^rtsp:\/\//i.test(url || '');
+}
+
+function fillLiveMedia(el) {
+  if (!el) return;
+  el.style.position = 'absolute';
+  el.style.left = '0';
+  el.style.top = '0';
+  el.style.width = '100%';
+  el.style.height = '100%';
+  el.style.objectFit = 'fill';
+  el.style.objectPosition = 'center';
 }
 
 /**
@@ -121,11 +132,13 @@ export default function StreamPlayer({
       img.onload = () => {
         if (aborted) return;
         img.style.display = 'block';
+        fillLiveMedia(img);
         if (video) video.style.display = 'none';
         setMedia(img);
         onLatency?.(Math.round(performance.now() - t0));
         report('LIVE');
       };
+      let misses = 0;
       img.onerror = () => {
         if (aborted) return;
         // An unscoped preview may still try MJPEG. A named camera that has no
@@ -134,7 +147,16 @@ export default function StreamPlayer({
           startSnapshot('/stream.mjpeg');
           return;
         }
-        report('ERROR');
+        misses += 1;
+        if (misses >= 4) {
+          report('ERROR');
+          return;
+        }
+        setTimeout(() => {
+          if (aborted || !img) return;
+          const sep = snapUrl.includes('?') ? '&' : '?';
+          img.src = `${snapUrl}${sep}t=${Date.now()}`;
+        }, 700);
       };
       if (/mjpeg/i.test(snapUrl)) {
         img.src = snapUrl;
@@ -146,6 +168,7 @@ export default function StreamPlayer({
 
     if (isMjpeg(playUrl) && img) {
       img.style.display = 'block';
+      fillLiveMedia(img);
       img.src = playUrl;
       img.onload = () => {
         if (aborted) return;
@@ -183,6 +206,7 @@ export default function StreamPlayer({
       let catchUpTimer;
       let usedMse = false;
       video.style.display = 'block';
+      fillLiveMedia(video);
       setMedia(video);
       video.preload = 'none';
 
@@ -207,14 +231,15 @@ export default function StreamPlayer({
           markLive();
           catchUpLive(video, 0.25);
         };
+        const still = go2rtcSnapshotUrl(playUrl) || snapshotForCamera('/frame.jpeg');
         video.onerror = () => {
           if (aborted) return;
           video.style.display = 'none';
-          startSnapshot(snapshotForCamera('/frame.jpeg'));
+          startSnapshot(still);
         };
         catchUpTimer = setInterval(() => catchUpLive(video, 0.25), 400);
         video.play().catch(() => {
-          if (!aborted) startSnapshot(snapshotForCamera('/frame.jpeg'));
+          if (!aborted) startSnapshot(still);
         });
       };
 
@@ -262,6 +287,7 @@ export default function StreamPlayer({
     }
 
     video.style.display = 'block';
+    fillLiveMedia(video);
     video.src = playUrl;
     setMedia(video);
     video.onplaying = () => {
@@ -295,6 +321,7 @@ export default function StreamPlayer({
         muted
         playsInline
         preload="none"
+        style={{ objectFit: 'fill', width: '100%', height: '100%' }}
       />
       <img ref={imgRef} className="stream-img" alt="Live camera stream" />
 
@@ -324,6 +351,7 @@ export default function StreamPlayer({
 
 function playHls(url, video, report, hlsRef, isAborted, setMedia) {
   video.style.display = 'block';
+  fillLiveMedia(video);
   setMedia?.(video);
   if (Hls.isSupported()) {
     const hls = new Hls();

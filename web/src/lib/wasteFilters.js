@@ -1,16 +1,25 @@
 import { CATEGORY_BY_CLASS, PARENT_CATEGORIES, WASTE_CLASSES } from '../constants';
-import { datasetAttributionCodeOf, datasetAttributionOf } from './datasetSource';
+import { datasetAttributionOf, datasetFilterKeyOf } from './datasetSource';
 
-/** Official parent categories for the current dataset. */
-export const WASTE_CATEGORIES = [...PARENT_CATEGORIES];
+/** Parent categories (Plastic, Metal, Glass, then any added in the catalog). Same array, kept current. */
+export const WASTE_CATEGORIES = PARENT_CATEGORIES;
+const HIDDEN_CATEGORIES = new Set(['paper', 'fishing gear', 'other', 'styrofoam', 'wood']);
+const HIDDEN_CLASSIFICATIONS = new Set([
+  'cardboard', 'paper bag', 'paper drink carton', 'plastic bag', 'other plastic', 'aluminum',
+  'scrap metal', 'tin can', 'glass fragment', 'fishing line', 'fishing net',
+  'coastal debris', 'litter', 'unknown', 'driftwood', 'drift wood',
+  'pallet / lumber', 'pallet/lumber', 'wood debris',
+]);
 
-/** YOLO11x classifications nested under the four parent categories. */
-export const WASTE_SUBTYPES = Object.fromEntries(
-  PARENT_CATEGORIES.map((category) => [
-    category,
-    WASTE_CLASSES.filter((name) => CATEGORY_BY_CLASS[name] === category),
-  ]),
-);
+/** Known classifications nested under each parent category, built from the current lists. */
+export function wasteSubtypes() {
+  return Object.fromEntries(
+    PARENT_CATEGORIES.map((category) => [
+      category,
+      WASTE_CLASSES.filter((name) => CATEGORY_BY_CLASS[name] === category),
+    ]),
+  );
+}
 
 function officialClass(value) {
   const raw = String(value || '').trim().toLowerCase();
@@ -22,25 +31,52 @@ function officialClass(value) {
   );
 }
 
-/** Map a detection to an official classification and one of the four categories. */
+/** Map a detection to its category and classification, including catalog names. */
 export function classifyWaste(det) {
-  const name =
-    officialClass(det?.dataset_class) ||
-    officialClass(det?.waste_subtype) ||
-    officialClass(det?.class);
-  if (name) {
-    return { category: CATEGORY_BY_CLASS[name], subtype: name };
+  const storedSubtype = String(det?.waste_subtype || det?.class || det?.dataset_class || '').trim();
+  const official = officialClass(storedSubtype);
+  if (official) {
+    return { category: CATEGORY_BY_CLASS[official] || '', subtype: official };
+  }
+  const category = String(det?.waste_category || det?.parent_category || '').trim();
+  if (category || storedSubtype) {
+    return { category, subtype: storedSubtype };
   }
   return { category: '', subtype: '' };
 }
 
-export function listsFromCatalog() {
-  return {
-    categories: [...WASTE_CATEGORIES],
-    subtypes: Object.fromEntries(
-      Object.entries(WASTE_SUBTYPES).map(([k, v]) => [k, [...v]]),
-    ),
-  };
+function sameName(left, right) {
+  return String(left || '').trim().toLowerCase() === String(right || '').trim().toLowerCase();
+}
+
+/** Official categories plus every category and classification saved in the catalog. */
+export function listsFromCatalog(catalog = []) {
+  const categories = [...WASTE_CATEGORIES];
+  const subtypes = Object.fromEntries(
+    Object.entries(wasteSubtypes()).map(([key, values]) => [
+      key,
+      values.filter((name) => !HIDDEN_CLASSIFICATIONS.has(name.toLowerCase())),
+    ]),
+  );
+
+  for (const category of catalog || []) {
+    const rawName = String(category?.name || '').trim();
+    if (!rawName || HIDDEN_CATEGORIES.has(rawName.toLowerCase())) continue;
+    let bucket = categories.find((name) => sameName(name, rawName));
+    if (!bucket) {
+      categories.push(rawName);
+      bucket = rawName;
+      subtypes[bucket] = [];
+    }
+    const list = subtypes[bucket] || (subtypes[bucket] = []);
+    for (const row of category.classifications || []) {
+      const className = String(row?.name || '').trim();
+      if (!className || HIDDEN_CLASSIFICATIONS.has(className.toLowerCase()) || list.some((name) => sameName(name, className))) continue;
+      list.push(className);
+    }
+  }
+
+  return { categories, subtypes };
 }
 
 export function wasteTypeOf(det) {
@@ -128,7 +164,7 @@ export function filterDetections(list, filters) {
     }
     const attrFilter = filters.datasetSource;
     if (attrFilter && attrFilter !== 'All Sources') {
-      if (datasetAttributionCodeOf(d) !== attrFilter) return false;
+      if (datasetFilterKeyOf(d) !== attrFilter) return false;
     }
     if (q) {
       const attr = datasetAttributionOf(d);

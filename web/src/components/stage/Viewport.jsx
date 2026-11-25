@@ -1,14 +1,12 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import StreamPlayer from './StreamPlayer';
 import DetectionOverlay from './DetectionOverlay';
 import { useCameraStore } from '../../stores/useCameraStore';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 import { useStreamOverlay, useYoloOverlay } from '../../hooks/useYoloOverlay';
-import { HUD_COORDS } from '../../data/mock';
+import { camerasInGrid } from '../../lib/gridCameras';
 
-const GO2RTC_BASE = import.meta.env.VITE_GO2RTC_URL || 'http://localhost:1990';
-
-/** go2rtc stream name from a credential-free MSE/WebRTC URL (?src=cam03). */
+/** go2rtc stream name from a credential-free MSE/WebRTC URL (?src=cam02). */
 function go2rtcSrcFromStreamUrl(url) {
   if (!url || /^rtsp:/i.test(url)) return null;
   try {
@@ -42,12 +40,6 @@ function go2rtcSrcFor(camera) {
   return KNOWN_GO2RTC.has(src) ? src : null;
 }
 
-function streamEmbedUrl(camera) {
-  const src = go2rtcSrcFor(camera);
-  if (!src) return null;
-  return `${GO2RTC_BASE}/webrtc.html?src=${encodeURIComponent(src)}`;
-}
-
 /** Browser-playable MSE URL for the main <video> (via Vite /go2rtc proxy). */
 function streamMseUrl(camera) {
   const src = go2rtcSrcFor(camera);
@@ -62,9 +54,11 @@ function score01(value) {
 }
 
 function overlayBoxVisible(box, hudFloor) {
-  const conf = score01(box.confidence);
-  if (box.provisional === true) return conf >= 0.5;
-  return conf >= Math.max(0.8, hudFloor);
+  // A tracked object stays drawn while the detector still has it.
+  if (box.track_id != null || box.held === true) return true;
+  const score = score01(box.confidence);
+  if (box.provisional === true) return score >= 0.5;
+  return score >= Math.max(0.8, hudFloor);
 }
 
 function freshOverlayBoxes(boxes, meta, cameraId, minConf = 0.8) {
@@ -87,12 +81,12 @@ function freshOverlayBoxes(boxes, meta, cameraId, minConf = 0.8) {
 }
 
 /** Grid tile with live go2rtc embed and this camera's own overlay. */
-function CameraTile({ camera, active, onSelect, detectionOn, showBoxes, showConfidence }) {
-  const embedUrl = streamEmbedUrl(camera);
-  const offline = camera.status === 'offline';
-  // A stale Offline flag must not hide a go2rtc stream that is actually up
-  // (CAM-04 was live in go2rtc while the tile stayed empty).
-  const showIframe = Boolean(embedUrl);
+function CameraTile({ camera, active, onSelect, onOpen, detectionOn, showBoxes, showConfidence }) {
+  const mseUrl = streamMseUrl(camera);
+  const [tileLive, setTileLive] = useState(false);
+  const [tileAttempt, setTileAttempt] = useState(0);
+  const setCameraOverlay = useCameraStore((s) => s.setCameraOverlay);
+  const clearCameraOverlay = useCameraStore((s) => s.clearCameraOverlay);
   const detectionAllowed = camera.detection !== false;
   const { boxes, meta } = useStreamOverlay({
     enabled: detectionOn && detectionAllowed && Boolean(camera.id),
@@ -106,12 +100,22 @@ function CameraTile({ camera, active, onSelect, detectionOn, showBoxes, showConf
   );
   const area = camera.location || camera.sector || '';
 
+  useEffect(() => {
+    if (!camera.id || !detectionOn || !detectionAllowed) {
+      if (camera.id) clearCameraOverlay(camera.id);
+      return undefined;
+    }
+    setCameraOverlay(camera.id, { boxes, meta });
+    return () => clearCameraOverlay(camera.id);
+  }, [camera.id, detectionOn, detectionAllowed, boxes, meta, setCameraOverlay, clearCameraOverlay]);
+
   return (
     <div
-      className={`grid-tile${active ? ' active' : ''}${offline ? ' offline' : ''}`}
+      className={`grid-tile${active ? ' active' : ''}${tileLive ? '' : ' offline'}`}
       role="button"
       tabIndex={0}
       onClick={() => onSelect(camera.id)}
+      onDoubleClick={() => onOpen?.(camera.id)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
@@ -119,26 +123,25 @@ function CameraTile({ camera, active, onSelect, detectionOn, showBoxes, showConf
         }
       }}
     >
-      <div className="grid-tile-feed">
-        {showIframe ? (
-          <iframe
-            className="grid-tile-iframe"
-            src={embedUrl}
-            title={`${camera.id} stream`}
-            scrolling="no"
-            allow="autoplay; encrypted-media"
-            loading="lazy"
+      <div
+        className="grid-tile-feed"
+        onClick={(event) => {
+          if (event.target.closest('button')) event.stopPropagation();
+        }}
+      >
+        {mseUrl ? (
+          <StreamPlayer
+            key={`${camera.id}-${tileAttempt}`}
+            url={mseUrl}
+            protocol="MSE"
+            cameraLabel={camera.id}
+            onStatusChange={(status) => setTileLive(status === 'LIVE')}
+            onConnectClick={() => setTileAttempt((n) => n + 1)}
           />
         ) : (
           <div className="grid-tile-empty">
             <span>{camera.id}</span>
-            <small>
-              {offline
-                ? 'Offline'
-                : !embedUrl
-                  ? 'Add stream in go2rtc'
-                  : 'Unavailable'}
-            </small>
+            <small>Add stream in go2rtc</small>
           </div>
         )}
         <div className="grid-tile-hud">
@@ -149,7 +152,7 @@ function CameraTile({ camera, active, onSelect, detectionOn, showBoxes, showConf
           />
         </div>
         {active && <span className="grid-tile-badge">Active</span>}
-        {showIframe && <span className="grid-tile-live">LIVE</span>}
+        {tileLive && <span className="grid-tile-live">LIVE</span>}
         <div className="grid-tile-status">
           {detectionOn && detectionAllowed && meta?.connected === false ? (
             <span>DETECT OFFLINE</span>
@@ -167,6 +170,71 @@ function CameraTile({ camera, active, onSelect, detectionOn, showBoxes, showConf
   );
 }
 
+function LensPane({
+  camera,
+  role,
+  active,
+  detectionOn,
+  showBoxes,
+  showConfidence,
+  playerAttempt,
+  onSelect,
+  onStatusChange,
+  onLatency,
+  onConnectClick,
+}) {
+  const { boxes, meta } = useStreamOverlay({
+    enabled: Boolean(camera?.id) && detectionOn && camera?.detection !== false,
+    cameraId: camera?.id,
+  });
+  const floor = Math.max(0.8, Number(meta?.hudConf) || 0.8);
+  const fresh = freshOverlayBoxes(boxes, meta, camera?.id, floor);
+  const url = streamMseUrl(camera) || '/stream.mjpeg';
+  const protocol = url.includes('stream.mp4') ? 'MSE' : 'MJPEG';
+  const allowed = camera?.detection !== false;
+
+  return (
+    <div
+      className={`lens-pane${active ? ' active' : ''}`}
+      onClick={() => camera?.id && onSelect(camera.id)}
+      onKeyDown={(event) => {
+        if ((event.key === 'Enter' || event.key === ' ') && camera?.id) {
+          event.preventDefault();
+          onSelect(camera.id);
+        }
+      }}
+      role="button"
+      tabIndex={0}
+    >
+      <div className="viewport-player">
+        <StreamPlayer
+          key={`${camera?.id || role}-${playerAttempt}`}
+          url={url}
+          protocol={protocol}
+          onStatusChange={active ? onStatusChange : undefined}
+          onLatency={active ? onLatency : undefined}
+          cameraLabel={camera?.id || role}
+          onConnectClick={active ? onConnectClick : undefined}
+        />
+        <div className="hud" aria-hidden="true">
+          <div className="hud-top">
+            <div className="hud-cam">
+              <span className="hud-cam-name">
+                {camera?.name || camera?.id || role}
+              </span>
+            </div>
+          </div>
+          <DetectionOverlay
+            boxes={allowed ? fresh : []}
+            visible={allowed && detectionOn && showBoxes !== false}
+            showConfidence={showConfidence !== false}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Viewport() {
   const viewportRef = useRef(null);
   const cameras = useCameraStore((s) => s.cameras);
@@ -176,46 +244,28 @@ export default function Viewport() {
   const inferenceMs = useCameraStore((s) => s.inferenceMs);
   const liveModel = useCameraStore((s) => s.liveModel);
   const detectionOn = useCameraStore((s) => s.detectionOn);
-  const overlayBoxes = useCameraStore((s) => s.overlayBoxes);
   const overlayMeta = useCameraStore((s) => s.overlayMeta);
   const gridView = useCameraStore((s) => s.gridView);
   const recording = useCameraStore((s) => s.recording);
+  const streamStatus = useCameraStore((s) => s.streamStatus);
   const setStreamStatus = useCameraStore((s) => s.setStreamStatus);
   const setLatencyMs = useCameraStore((s) => s.setLatencyMs);
+  const [playerAttempt, setPlayerAttempt] = useState(0);
   const setActiveCamera = useCameraStore((s) => s.setActiveCamera);
   const setGridView = useCameraStore((s) => s.setGridView);
   const settings = useSettingsStore((s) => s.settings);
-  const openSettings = useSettingsStore((s) => s.openSettings);
-  const token = useAuthStore((s) => s.token);
 
-  const conf = Math.max(
-    0.8,
-    Number(overlayMeta?.hudConf ?? settings.detection?.confidence ?? 0.8),
-  );
-  // Overlay follows the selected lens/camera when detection is enabled for it.
+  useEffect(() => {
+    if (streamStatus !== 'ERROR') return undefined;
+    const timer = setTimeout(() => {
+      setLatencyMs(null);
+      setPlayerAttempt((attempt) => attempt + 1);
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [streamStatus, playerAttempt, setLatencyMs]);
+
   const detectionAllowed = activeCamera?.detection !== false;
-  const activeId = String(activeCameraId || '').toUpperCase();
-  // Live video from go2rtc (low latency). Boxes from /overlay for this camera_id.
-  const streamUrl = streamMseUrl(activeCamera) || '/stream.mjpeg';
-  const streamProtocol = streamUrl?.includes('stream.mp4') ? 'MSE' : 'MJPEG';
-  // Never paint another stream's boxes on this panel.
-  const panelBoxes = (overlayBoxes || []).filter((box) => {
-    const boxCam = String(box.camera_id || overlayMeta?.cameraId || '').toUpperCase();
-    if (boxCam && activeId && boxCam !== activeId) return false;
-    return overlayBoxVisible(box, conf);
-  });
-  const detectPublishMs =
-    overlayMeta?.detectToPublishMs ?? inferenceMs ?? null;
-  const inferFps = overlayMeta?.inferenceFps;
-  const overlayAgeMs =
-    overlayMeta?.overlayAgeMs ??
-    (overlayMeta?.overlayPublishedAt != null
-      ? Math.max(0, Math.round((Date.now() / 1000 - overlayMeta.overlayPublishedAt) * 1000))
-      : null);
-  // 4-stream CPU plus review I/O can leave overlay_age around 10–15s. Keep boxes.
-  const staleMs = Math.max(25000, (detectPublishMs || 0) * 4 + 4000);
-  const freshBoxes =
-    overlayAgeMs != null && overlayAgeMs > staleMs ? [] : panelBoxes;
+  const detectPublishMs = overlayMeta?.detectToPublishMs ?? inferenceMs ?? null;
 
   useYoloOverlay({
     enabled: detectionOn && !gridView && detectionAllowed && Boolean(activeCameraId),
@@ -228,110 +278,45 @@ export default function Viewport() {
   );
 
   const handleConnect = () => {
-    openSettings();
+    setLatencyMs(null);
     setStreamStatus('CONNECTING…');
+    setPlayerAttempt((attempt) => attempt + 1);
   };
 
+  // Same name as Dataset Source and Today's Report, e.g. "YOLOv11l / Roboflow · local-ortk7 v2".
   const model =
-    liveModel ||
+    settings.live_model?.label ||
     settings.detection?.model ||
-    'YOLOv11n ONNX · best.onnx';
+    liveModel ||
+    'YOLOv11l / Roboflow';
 
   return (
     <div
-      className={`viewport${gridView ? ' grid-mode' : ''}`}
+      className={`viewport${gridView ? ' grid-mode' : ''}${detectionOn ? '' : ' detection-off'}`}
       id="viewport"
       ref={viewportRef}
     >
-      {!gridView && (
-        <div className="viewport-player">
-          <StreamPlayer
-            key={activeCameraId || 'cam'}
-            url={streamUrl}
-            protocol={streamProtocol}
+      {!gridView && activeCamera && (
+        <div className="camera-stage">
+          <LensPane
+            camera={activeCamera}
+            role={activeCamera.id}
+            active
+            detectionOn={detectionOn}
+            showBoxes={settings.detection?.showBoxes}
+            showConfidence={settings.detection?.showConfidence}
+            playerAttempt={playerAttempt}
+            onSelect={setActiveCamera}
             onStatusChange={onStatusChange}
             onLatency={setLatencyMs}
-            cameraLabel={activeCamera?.id || 'CAM-01'}
             onConnectClick={handleConnect}
           />
-
-          <div className="hud" aria-hidden="true">
-            <div className="hud-top">
-              <div className="hud-cam">
-                {recording && <span className="rec">REC</span>}
-                <span className="hud-cam-name">
-                  {(activeCamera?.name || 'Wide-Angle Lens').toUpperCase()}
-                </span>
-                {activeCamera?.location || activeCamera?.sector ? (
-                  <span className="hud-cam-name" style={{ opacity: 0.75 }}>
-                    · {(activeCamera.location || activeCamera.sector || '').toUpperCase()}
-                  </span>
-                ) : null}
-                {detectionOn && detectionAllowed && overlayMeta?.connected === false ? (
-                  <span className="hud-cam-name" style={{ opacity: 0.85, color: '#f0a0a0' }}>
-                    · DETECT OFFLINE
-                  </span>
-                ) : null}
-                {detectionOn &&
-                detectionAllowed &&
-                overlayMeta?.motionActive ? (
-                  <span className="hud-cam-name" style={{ opacity: 0.8 }}>
-                    · MOTION
-                  </span>
-                ) : null}
-              </div>
-              <div className="hud-meta">
-                <span>
-                  {String(
-                    activeCamera?.resolution || settings.stream?.resolution || '1920×1080',
-                  ).replace(/\s/g, '')}
-                </span>
-                <span>{activeCamera?.fps || settings.stream?.fps || '25 FPS'}</span>
-                <span>{latencyMs != null ? `${latencyMs} ms` : '— ms'}</span>
-                {overlayMeta?.frameId != null ? (
-                  <span style={{ opacity: 0.7 }}>f{overlayMeta.frameId}</span>
-                ) : null}
-              </div>
-            </div>
-
-            <DetectionOverlay
-              boxes={detectionAllowed ? freshBoxes : []}
-              visible={
-                detectionAllowed &&
-                detectionOn &&
-                settings.detection?.showBoxes !== false
-              }
-              showConfidence={settings.detection?.showConfidence !== false}
-            />
-
-            <div className="hud-bottom">
-              <div className="hud-coords">
-                LAT <b>{HUD_COORDS.lat}</b> · LON <b>{HUD_COORDS.lon}</b>
-                <br />
-                ZONE <b>{HUD_COORDS.zone}</b>
-              </div>
-              <div className="hud-model">
-                <span className="model-chip">{model}</span>
-                <br />
-                CONF ≥ {Number(conf).toFixed(2)} · NMS 0.45 ·{' '}
-                <span>
-                  {detectPublishMs != null && detectionAllowed
-                    ? `${detectPublishMs} ms detect→HUD`
-                    : '— ms detect→HUD'}
-                </span>
-                {inferFps != null && detectionAllowed ? (
-                  <>
-                    {' '}
-                    · <span>{Number(inferFps).toFixed(1)} FPS</span>
-                  </>
-                ) : null}
-              </div>
-            </div>
-
-            <span className="frame-tick tl" />
-            <span className="frame-tick tr" />
-            <span className="frame-tick bl" />
-            <span className="frame-tick br" />
+          <div className="camera-stage-meta">
+            {recording ? <span className="rec">REC</span> : null}
+            <span>{activeCamera.name || activeCamera.id}</span>
+            <span className="model-chip">{model}</span>
+            <span>{latencyMs != null ? `${latencyMs} ms` : '— ms'}</span>
+            {detectPublishMs != null ? <span>{detectPublishMs} ms detect</span> : null}
           </div>
         </div>
       )}
@@ -340,7 +325,13 @@ export default function Viewport() {
         <>
           <div className="viewport-player is-parked" aria-hidden="true" />
           <div className="camera-grid">
-            {cameras.map((cam) => (
+            {camerasInGrid(cameras).length === 0 ? (
+              <div className="grid-tile-empty">
+                <span>No cameras in grid</span>
+                <small>Turn on Enable in grid view for the wide cameras</small>
+              </div>
+            ) : null}
+            {camerasInGrid(cameras).map((cam) => (
               <CameraTile
                 key={cam.id}
                 camera={cam}
@@ -348,7 +339,8 @@ export default function Viewport() {
                 detectionOn={detectionOn}
                 showBoxes={settings.detection?.showBoxes}
                 showConfidence={settings.detection?.showConfidence}
-                onSelect={(id) => {
+                onSelect={setActiveCamera}
+                onOpen={(id) => {
                   setActiveCamera(id);
                   setGridView(false);
                 }}

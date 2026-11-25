@@ -17,6 +17,12 @@ class WasteClassMappingTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        \App\Models\SystemSetting::saveDefault(['detection' => ['enabled' => true], 'alerts' => ['detectionAlerts' => true]]);
+    }
+
     private function catalog(): WasteCategory
     {
         $category = WasteCategory::query()->create([
@@ -42,7 +48,7 @@ class WasteClassMappingTest extends TestCase
         $this->assertSame('Ecobag', $ecobag->waste_type);
         $this->assertSame('Plastic Bag', $plasticBag->waste_type);
         $this->assertNotSame($ecobag->id, $plasticBag->id);
-        $this->assertSame('Other Plastic', WasteClassifier::resolve('Face Mask')->waste_type);
+        $this->assertSame('Face Mask', WasteClassifier::resolve('Face Mask')->waste_type);
     }
 
     public function test_styrofoam_and_ecobag_keep_their_own_names(): void
@@ -55,6 +61,10 @@ class WasteClassMappingTest extends TestCase
 
         $this->assertSame('Styrofoam', WasteClassifier::resolve('Styrofoam')->waste_type);
         $this->assertSame('Ecobag', WasteClassifier::resolve('Ecobag')->waste_type);
+        $this->assertSame('Can', WasteClassifier::resolve('Can')->waste_type);
+        $this->assertSame('Paper Drink Carton', WasteClassifier::resolve('Paper Drink Carton')->waste_type);
+        $this->assertSame('Plastic Wrapper', WasteClassifier::resolve('Plastic Wrapper')->waste_type);
+        $this->assertSame('Styro Cup', WasteClassifier::resolve('Styro Cup')->waste_type);
         $this->assertNotSame(
             WasteClassifier::resolve('Styrofoam')->id,
             WasteClassifier::resolve('Ecobag')->id,

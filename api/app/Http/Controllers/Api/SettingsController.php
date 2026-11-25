@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\SystemSetting;
 use App\Support\DatasetClasses;
+use App\Support\LiveModel;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -18,13 +19,33 @@ class SettingsController extends Controller
 
     private const DEFAULT_DETECT_CONF = 0.80;
 
+
+    private const CLIP_SECONDS_OPTIONS = [15, 30, 60, 180, 300, 600];
+
+
+    private const DEFAULT_CLIP_SECONDS = 60;
+
     private const DEFAULT_RECORD_CONF = 0.80;
 
-    private const DEFAULT_REVIEW_CONF = 0.50;
+    private const DEFAULT_REVIEW_CONF = 0.60;
 
     public function show(): JsonResponse
     {
-        return response()->json($this->mergedSettings());
+        return response()->json($this->withLiveModel($this->mergedSettings()));
+    }
+
+    /**
+     * The model the cameras run, as the rest of the system names it
+     * (Dataset Source, Today's Report): "YOLOv11l / Roboflow" + the dataset.
+     * Updated on Deploy and Rollback.
+     */
+    private function withLiveModel(array $settings): array
+    {
+        $live = LiveModel::current();
+        $settings['live_model'] = $live + ['label' => "{$live['model']} / Roboflow · {$live['dataset']}"];
+        $settings['detection']['model'] = $settings['live_model']['label'];
+
+        return $settings;
     }
 
     /** Values the live detector applies. No stream passwords or other settings. */
@@ -37,7 +58,7 @@ class SettingsController extends Controller
         $classes = $detection['classes'] ?? [];
 
         return response()->json([
-            'enabled' => (bool) ($detection['enabled'] ?? true),
+            'enabled' => (bool) ($detection['enabled'] ?? false),
             'confidence' => $this->clampConfidence(
                 $detection['confidence'] ?? null,
                 self::DEFAULT_DETECT_CONF
@@ -46,7 +67,7 @@ class SettingsController extends Controller
                 $detection['review_confidence'] ?? null
             ),
             'interval' => (int) ($detection['interval'] ?? 1),
-            'classes' => $this->runtimeClasses($classes),
+            'classes' => \App\Support\ClassRegistry::live(),
             'recording' => [
                 'record_confidence' => $this->clampConfidence(
                     $recording['record_confidence'] ?? null,
@@ -86,10 +107,20 @@ class SettingsController extends Controller
         $merged['detection']['review_confidence'] = $this->clampReviewConfidence(
             $merged['detection']['review_confidence'] ?? null
         );
+        $merged['recording']['clip_max_seconds'] = $this->clampClipSeconds(
+            $merged['recording']['clip_max_seconds'] ?? null
+        );
+        unset($merged['detection']['fusion']);
+        $merged['alerts']['cleanupLimit'] = max(1, min(500, (int) ($merged['alerts']['cleanupLimit'] ?? 20)));
+        $merged['alerts']['densityThreshold'] = max(10, min(95, (int) ($merged['alerts']['densityThreshold'] ?? 70)));
 
         SystemSetting::saveDefault($merged);
+        if (array_key_exists('enabled', $settings['detection'] ?? []) && ! filter_var($settings['detection']['enabled'], FILTER_VALIDATE_BOOLEAN)) {
+            // Detection off: nothing is watched any more, so nothing is "still on the beach".
+            \App\Support\WastePresence::sweepStale(force: true);
+        }
 
-        return response()->json($this->mergedSettings());
+        return response()->json($this->withLiveModel($this->mergedSettings()));
     }
 
     /**
@@ -111,6 +142,14 @@ class SettingsController extends Controller
         $merged['detection']['review_confidence'] = $this->clampReviewConfidence(
             $merged['detection']['review_confidence'] ?? null
         );
+        $merged['recording']['clip_max_seconds'] = $this->clampClipSeconds(
+            $merged['recording']['clip_max_seconds'] ?? null
+        );
+        unset($merged['detection']['fusion']);
+        $stationName = trim((string) ($merged['station']['name'] ?? ''));
+        if ($stationName === '' || $stationName === 'Station 01 — North Shoreline') {
+            $merged['station']['name'] = 'Brgy. Gracia';
+        }
 
         return $merged;
     }
@@ -122,6 +161,16 @@ class SettingsController extends Controller
      * @param  array<string, mixed>  $incoming
      * @return array<string, mixed>
      */
+    /**
+     * Live Monitoring clip length. Only the lengths offered in Settings are kept.
+     */
+    private function clampClipSeconds(mixed $value): int
+    {
+        $seconds = (int) $value;
+
+        return in_array($seconds, self::CLIP_SECONDS_OPTIONS, true) ? $seconds : self::DEFAULT_CLIP_SECONDS;
+    }
+
     private function replaceSettings(array $base, array $incoming): array
     {
         $merged = array_replace_recursive($base, $incoming);
@@ -197,12 +246,12 @@ class SettingsController extends Controller
                 'fps' => '25 FPS',
             ],
             'detection' => [
-                'model' => 'YOLOv11s ONNX · best.onnx',
-                'enabled' => true,
+                'model' => 'YOLOv11x ONNX · best.onnx',
+                'enabled' => false,
                 'confidence' => self::DEFAULT_DETECT_CONF,
                 'review_confidence' => self::DEFAULT_REVIEW_CONF,
                 'interval' => 2,
-                'classes' => DatasetClasses::NAMES,
+                'classes' => \App\Support\ClassRegistry::live(),
                 'showBoxes' => true,
                 'showConfidence' => true,
             ],
@@ -212,10 +261,13 @@ class SettingsController extends Controller
                 'track_lost_timeout' => 3,
                 'detection_cooldown' => 10,
                 'prevent_duplicate' => true,
+                'clip_max_seconds' => self::DEFAULT_CLIP_SECONDS,
             ],
             'alerts' => [
                 'densityAlerts' => true,
+                'detectionAlerts' => false,
                 'densityThreshold' => 70,
+                'cleanupLimit' => \App\Support\WasteLoad::DEFAULT_LIMIT,
                 'largeItemAlerts' => true,
                 'offlineAlerts' => true,
                 'email' => '',
@@ -223,7 +275,7 @@ class SettingsController extends Controller
                 'reportFrequency' => 'Daily · 06:00',
             ],
             'station' => [
-                'name' => 'Station 01 — North Shoreline',
+                'name' => 'Brgy. Gracia',
                 'lat' => '14.3486',
                 'lon' => '121.3244',
                 'timezone' => 'Asia/Manila (UTC+8)',

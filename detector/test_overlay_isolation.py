@@ -10,6 +10,31 @@ from streams import StreamPublishState
 
 
 class OverlayIsolationTests(unittest.TestCase):
+    def setUp(self):
+        # Class rules are tested with every class on; .env exclusions are tested below.
+        excluded = patch.object(detector_app.settings, "excluded_classes", "")
+        excluded.start()
+        self.addCleanup(excluded.stop)
+
+    def test_excluded_classes_are_dropped_from_live_and_review(self):
+        detector_app.settings.excluded_classes = "Cardboard,Paper Drink Carton,Paper Bag"
+        review: list = []
+        boxes = detector_app.apply_class_refinement(
+            [
+                {"class": "Cardboard", "confidence": 0.9, "left": 10, "top": 10, "width": 6, "height": 6},
+                {"class": "paper bag", "confidence": 0.75, "left": 30, "top": 30, "width": 6, "height": 6},
+                {"class": "Paper Drink Carton", "confidence": 0.9, "left": 50, "top": 50, "width": 6, "height": 6},
+                {"class": "Plastic Bottle", "confidence": 0.9, "left": 70, "top": 70, "width": 6, "height": 6},
+            ],
+            review,
+        )
+        self.assertEqual([b["class"] for b in boxes], ["Plastic Bottle"])
+        self.assertEqual(review, [])
+        names = ["Can", "Cardboard", "Ecobag", "Paper Bag", "Paper Drink Carton", "Plastic Bottle"]
+        self.assertEqual(detector_app.allowed_class_ids(names), [0, 2, 5])
+
+    def test_no_exclusions_keeps_every_class_id(self):
+        self.assertIsNone(detector_app.allowed_class_ids(["Can", "Cardboard"]))
     def test_missing_stream_returns_none_not_sibling(self):
         cam01 = StreamPublishState(ready=True, last_boxes=[{"class": "Can", "camera_id": "CAM-01"}])
         with patch.object(detector_app, "_stream_states", {"CAM-01": cam01}):
@@ -130,7 +155,28 @@ class OverlayIsolationTests(unittest.TestCase):
         )
         self.assertIsNone(label)
 
-    def test_overlap_keeps_wrapper_over_cardboard(self):
+    def test_weak_official_class_stays_on_the_hud(self):
+        review = []
+        boxes = detector_app.apply_class_refinement(
+            [
+                {
+                    "class": "Plastic Wrapper",
+                    "confidence": 0.74,
+                    "width": 8.0,
+                    "height": 15.2,
+                    "left": 40.0,
+                    "top": 40.0,
+                    "camera_id": "CAM-03",
+                }
+            ],
+            review_out=review,
+        )
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0]["class"], "Plastic Wrapper")
+        self.assertTrue(boxes[0]["provisional"])
+        self.assertEqual(len(review), 1)
+
+    def test_overlap_keeps_higher_confidence_cardboard(self):
         boxes = detector_app.apply_class_refinement(
             [
                 {
@@ -148,6 +194,62 @@ class OverlayIsolationTests(unittest.TestCase):
                     "top": 65.2,
                     "width": 7.8,
                     "height": 14.3,
+                },
+            ]
+        )
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0]["class"], "Cardboard")
+
+    def test_small_ecobag_keeps_model_name(self):
+        label = detector_app.refine_waste_class(
+            {
+                "class": "Ecobag",
+                "confidence": 0.88,
+                "width": 9.0,
+                "height": 12.0,
+            }
+        )
+        self.assertEqual(label, "Ecobag")
+        with patch.object(detector_app.settings, "class_identity_remap", True):
+            remapped = detector_app.refine_waste_class(
+                {
+                    "class": "Ecobag",
+                    "confidence": 0.88,
+                    "width": 9.0,
+                    "height": 12.0,
+                }
+            )
+        self.assertEqual(remapped, "Plastic Wrapper")
+
+    def test_large_ecobag_stays_ecobag(self):
+        label = detector_app.refine_waste_class(
+            {
+                "class": "Ecobag",
+                "confidence": 0.88,
+                "width": 28.0,
+                "height": 40.0,
+            }
+        )
+        self.assertEqual(label, "Ecobag")
+
+    def test_overlap_keeps_higher_confidence_wrapper(self):
+        boxes = detector_app.apply_class_refinement(
+            [
+                {
+                    "class": "Ecobag",
+                    "confidence": 0.81,
+                    "left": 40.0,
+                    "top": 40.0,
+                    "width": 20.0,
+                    "height": 26.0,
+                },
+                {
+                    "class": "Plastic Wrapper",
+                    "confidence": 0.90,
+                    "left": 40.2,
+                    "top": 40.1,
+                    "width": 20.0,
+                    "height": 26.0,
                 },
             ]
         )
@@ -213,7 +315,7 @@ class OverlayIsolationTests(unittest.TestCase):
             )
         self.assertEqual(label, "Plastic Wrapper")
 
-    def test_track_upgrades_to_higher_priority_class(self):
+    def test_one_frame_does_not_rename_the_track(self):
         tracks = {}
         first = [
             {
@@ -239,7 +341,7 @@ class OverlayIsolationTests(unittest.TestCase):
             }
         ]
         detector_app.update_tracks(tracks, second, 2.0, 3, 0.8, 3.0)
-        self.assertEqual(second[0]["class"], "Plastic Wrapper")
+        self.assertEqual(second[0]["class"], "Cardboard")
 
     def test_skinny_bag_is_dropped(self):
         label = detector_app.refine_waste_class(
@@ -252,7 +354,7 @@ class OverlayIsolationTests(unittest.TestCase):
         )
         self.assertIsNone(label)
 
-    def test_overlap_keeps_bottle_over_wrapper(self):
+    def test_overlap_keeps_stronger_wrapper_over_bottle(self):
         boxes = detector_app.apply_class_refinement(
             [
                 {
@@ -274,7 +376,7 @@ class OverlayIsolationTests(unittest.TestCase):
             ]
         )
         self.assertEqual(len(boxes), 1)
-        self.assertEqual(boxes[0]["class"], "Plastic Bottle")
+        self.assertEqual(boxes[0]["class"], "Plastic Wrapper")
 
     def test_track_keeps_stable_class(self):
         tracks = {}
@@ -338,13 +440,15 @@ class OverlayIsolationTests(unittest.TestCase):
 
     def test_two_strip_alias_is_full_plus_tiles(self):
         self.assertEqual(detector_app.detection_mode("two_strip"), "full_plus_tiles")
+        self.assertEqual(detector_app.stream_detection_mode("cam02"), detector_app.stream_detection_mode("cam01"))
+        self.assertEqual(detector_app.stream_detection_mode("cam04"), "full_frame")
 
-    def test_resolve_model_classes_warns_on_count_mismatch(self):
+    def test_resolve_model_classes_keeps_model_order_on_count_mismatch(self):
         class Fake:
             names = {0: "Can", 1: "Cardboard"}
 
         mapped = detector_app.resolve_model_classes(Fake())
-        self.assertEqual(mapped, list(detector_app.ONNX_CLASSES))
+        self.assertEqual(mapped, ["Can", "Cardboard"])
 
     def test_majority_vote_allows_equal_priority_switch(self):
         tracks = {}
@@ -379,6 +483,10 @@ class OverlayIsolationTests(unittest.TestCase):
         self.assertFalse(detector_app.is_person_sized(mask))
         telephoto = {"class": "Plastic Bottle", "confidence": 0.9, "width": 30, "height": 40}
         self.assertFalse(detector_app.is_person_sized(telephoto))
+        zoomed = {"class": "Plastic Bottle", "confidence": 0.91, "width": 28, "height": 62}
+        self.assertFalse(detector_app.is_person_sized(zoomed))
+        standing = {"class": "Plastic Bottle", "confidence": 0.91, "width": 24, "height": 78}
+        self.assertTrue(detector_app.is_person_sized(standing))
         kept = detector_app.filter_overlay_boxes([person, bottle, mask])
         self.assertEqual([box["class"] for box in kept], ["Plastic Bottle", "Face Mask"])
 
@@ -444,7 +552,7 @@ class OverlayIsolationTests(unittest.TestCase):
         self.assertEqual(detector_app.drop_disputed_saves(pending, disputes), [])
         self.assertIn(3, pending)
 
-    def test_low_confidence_known_class_is_queued_for_review_not_live(self):
+    def test_low_confidence_known_class_is_not_queued_for_review(self):
         live = {
             "confidence": 0.80,
             "record_conf": 0.80,
@@ -460,8 +568,7 @@ class OverlayIsolationTests(unittest.TestCase):
         kept = detector_app._apply_detection_settings(boxes, live)
         review = detector_app._low_confidence_review_boxes(boxes, live)
         self.assertEqual([box["class"] for box in kept], ["Plastic Bottle"])
-        self.assertEqual([box["class"] for box in review], ["Can"])
-        self.assertAlmostEqual(review[0]["confidence"], 0.62)
+        self.assertEqual(review, [])
 
 
 if __name__ == "__main__":

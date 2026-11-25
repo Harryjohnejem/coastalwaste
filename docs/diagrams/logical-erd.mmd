@@ -7,9 +7,7 @@ erDiagram
     users ||--o{ reports : "generates"
     users ||--o{ notifications : "receives"
     cameras ||--o{ detections : "captures"
-    cameras ||--o{ waste_quotas : "may scope"
     waste_categories ||--|{ waste_classifications : "has"
-    waste_categories ||--o{ waste_quotas : "may scope"
     waste_classifications ||--o{ detections : "classifies"
     detections ||--o{ detection_images : "has"
     detections ||--o{ detection_logs : "has"
@@ -90,19 +88,6 @@ erDiagram
         decimal confidence
         int processing_time_ms
         timestamp created_at
-    }
-
-    waste_quotas {
-        bigint id PK
-        varchar name
-        bigint camera_id FK "nullable"
-        bigint category_id FK "nullable"
-        int quota_limit
-        enum period
-        text cleanup_recommendation
-        boolean is_active
-        timestamp created_at
-        timestamp updated_at
     }
 
     reports {

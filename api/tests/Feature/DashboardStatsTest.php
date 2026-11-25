@@ -16,6 +16,7 @@ class DashboardStatsTest extends TestCase
 
     public function test_today_stats_count_each_detection_once(): void
     {
+        \App\Models\SystemSetting::saveDefault(['detection' => ['enabled' => true]]);
         $user = User::factory()->create();
         $camera = Camera::query()->create([
             'camera_code' => 'CAM-01',
@@ -46,7 +47,7 @@ class DashboardStatsTest extends TestCase
             'location' => 'Paco Beach',
             'detected_at' => now()->subDay(),
             'removed_at' => now(),
-            'status' => 'Confirmed Cleaned',
+            'status' => 'No Longer Visible',
             'removal_reason' => 'inferred_disappearance',
         ]);
 
@@ -56,13 +57,14 @@ class DashboardStatsTest extends TestCase
         $response->assertJsonPath('total_detections', 2);
         $response->assertJsonPath('detections', 1);
         $response->assertJsonPath('present', 1);
-        $response->assertJsonPath('confirmed_cleaned', 1);
-        $response->assertJsonPath('confirmed_cleaned_today', 1);
+        $response->assertJsonPath('no_longer_visible', 1);
+        $response->assertJsonPath('no_longer_visible_today', 1);
         $this->assertNotNull($response->json('last_removed_at'));
     }
 
     public function test_composition_aggregates_without_loading_detection_logs(): void
     {
+        \App\Models\SystemSetting::saveDefault(['detection' => ['enabled' => true]]);
         $user = User::factory()->create();
         $camera = Camera::query()->create([
             'camera_code' => 'CAM-01',

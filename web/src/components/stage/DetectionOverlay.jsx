@@ -30,8 +30,10 @@ export default function DetectionOverlay({ boxes, visible, showConfidence = true
         );
         const unlabeled = Boolean(box.needs_label) && !knownClass;
         const sand = box.variant === 'sand' || /net|fishing/i.test(box.class || '');
-        const conf =
-          box.confidence != null ? Number(box.confidence).toFixed(2) : null;
+        const rawConf = Number(box.confidence);
+        const conf = Number.isFinite(rawConf)
+          ? `${Math.round(rawConf > 1.5 ? rawConf : rawConf * 100)}%`
+          : null;
         const stage = String(box.stage || '').toLowerCase();
         const pending =
           !unlabeled &&

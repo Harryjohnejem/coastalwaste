@@ -20,7 +20,7 @@ fi
 
 echo "[go2rtc] TAPO_HOST=${TAPO_HOST}"
 if [[ -z "${TAPO2_HOST:-}" || -z "${TAPO2_RTSP_USER:-}" || -z "${TAPO2_RTSP_PASS:-}" ]]; then
-  echo "[go2rtc] warning: second camera account is incomplete — cam03 and cam04 stay offline until TAPO2_HOST, TAPO2_RTSP_USER, and TAPO2_RTSP_PASS are set. CAM-01 and CAM-02 still start."
+  echo "[go2rtc] warning: second wide camera stays offline until TAPO2_HOST, TAPO2_RTSP_USER, and TAPO2_RTSP_PASS are set. CAM-01 still starts."
   if [[ -n "${TAPO2_HOST:-}" ]]; then
     echo "[go2rtc] TAPO2_HOST=${TAPO2_HOST}"
   fi

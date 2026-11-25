@@ -1,7 +1,7 @@
 # TidalWatch waste detector (Python · YOLOv11)
 
 Each configured camera/lens has its own JPEG reader, ByteTrack tracker, and
-OpenCV MOG2 motion model. A shared YOLOv11s ONNX model (`weights/trained/best.onnx`)
+OpenCV MOG2 motion model. A shared YOLOv11x ONNX model (`weights/trained/best.onnx`)
 runs under one inference lock. Live HUD boxes come from `/overlay?camera_id=`
 as soon as YOLO + ByteTrack finish; Laravel recording still waits for
 track confirmation at `RECORD_CONF`.
@@ -30,6 +30,13 @@ pip install -r requirements.txt
 
 First run loads `yolov8s-worldv2.pt` (not committed; Ultralytics downloads it).
 `DETECTOR_KEY` in `.env` must match `api/.env`.
+
+The live xlarge detector runs through ONNX Runtime's CPU provider; no GPU or
+CUDA package is required. CPU inference is slower than GPU inference, so the
+live crop mode and frame interval determine how quickly each camera updates.
+The exporter keeps FP32 and checks class names/order in both the source
+checkpoint and generated ONNX. Startup stops on a mismatch rather than
+publishing boxes under potentially incorrect class names.
 
 ## Run (gateway + API already up)
 
@@ -70,8 +77,34 @@ python eval_detect.py
 
 See `.env` — `DETECTOR_KEY` must match `DETECTOR_KEY` in `api/.env`.
 
-Live frames use the local YOLOv11s ONNX file, not the Roboflow workflow.
+Live frames use the local YOLOv11x ONNX file, not the Roboflow workflow.
 Roboflow remains optional for dataset download / smoke tests only.
+
+## Use weights (12) checkpoint
+
+Place `weights (12).pt` in `C:\Users\Admin\Downloads` and run:
+
+```bash
+python export_onnx.py
+```
+
+The exporter checks all 14 class names and their order against the live
+detector before replacing
+`weights/trained/best.onnx`. It keeps backups of the previous ONNX and PyTorch
+model. Restart the detector after a successful export; its cameras load
+`best.onnx` at startup. If it rejects the class list, reconcile the training
+dataset and live catalog before deployment; changing names alone cannot add a
+class the model was not trained to recognize.
+
+Measure box and class quality on labeled camera images after export:
+
+```bash
+python eval_detect.py --dataset datasets/local-merged --split valid
+python bench_detect.py
+```
+
+The checkpoint is YOLOv11x with 14 classes, including `Plastic Spoon`. Keep
+the model and catalog class order identical so saved labels remain correct.
 
 Smoke check (needs the key and network):
 

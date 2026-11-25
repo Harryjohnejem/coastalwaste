@@ -8,6 +8,7 @@ use App\Models\Detection;
 use App\Models\Report;
 use App\Models\User;
 use App\Support\DashboardCache;
+use App\Support\DatasetClasses;
 use App\Support\OfficialReportPdf;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -57,6 +58,47 @@ class ReportController extends Controller
             'generated_at' => $report->generated_at?->toIso8601String(),
             'created_at' => $report->created_at?->toIso8601String(),
         ], 201);
+    }
+
+    /**
+     * Every saved record for Reports & Analytics and the report form, in a
+     * compact shape (only the fields the reports use), so totals are not cut
+     * at the 1000-row limit of the detections list.
+     */
+    public function records(): JsonResponse
+    {
+        $rows = [];
+        Detection::query()
+            ->notMovedToReview()
+            ->where('status', '!=', 'Ignored')
+            ->with(['camera:id,camera_code', 'classification.category', 'latestLog'])
+            ->lazyById(1000)
+            ->each(function (Detection $d) use (&$rows) {
+                $class = DatasetClasses::match($d->latestLog?->raw_label);
+                $category = DatasetClasses::categoryOf($class);
+                $confidence = (float) $d->confidence;
+                $rows[] = [
+                    'id' => $d->id,
+                    'camera_id' => $d->camera?->camera_code,
+                    'class' => $class ?? $d->classification?->waste_type,
+                    'dataset_class' => $class,
+                    'waste_category' => $category ?? $d->classification?->category?->category_name,
+                    'parent_category' => $category,
+                    'confidence' => $confidence > 1 ? round($confidence / 100, 4) : $confidence,
+                    'count' => $d->quantity,
+                    'location' => $d->location,
+                    'sector' => $d->location,
+                    'detected_at' => $d->detected_at?->format('Y-m-d H:i:s'),
+                    'detected_at_iso' => $d->detected_at?->toIso8601String(),
+                    'removed_at' => $d->removed_at?->format('Y-m-d H:i:s'),
+                    'status' => $d->status,
+                    'status_label' => $d->statusLabel(),
+                    'cleaning_verified_at' => $d->cleaning_verified_at?->format('Y-m-d H:i:s'),
+                ];
+            });
+        usort($rows, fn ($a, $b) => strcmp((string) $b['detected_at'], (string) $a['detected_at']));
+
+        return response()->json($rows)->header('Cache-Control', 'no-store');
     }
 
     public function email(Request $request): JsonResponse

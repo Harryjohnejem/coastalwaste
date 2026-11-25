@@ -17,6 +17,7 @@ export default function AddWasteModal({
   defaultCategoryId,
   stacked = false,
   onClose,
+  onCreated,
 }) {
   const catalog = useSettingsStore((s) => s.wasteCatalog);
   const addWasteCategory = useSettingsStore((s) => s.addWasteCategory);
@@ -36,9 +37,13 @@ export default function AddWasteModal({
     setDescription('');
     setError('');
     setSaving(false);
-    const fallback = catalog[0]?.id ? String(catalog[0].id) : '';
-    setCategoryId(defaultCategoryId ? String(defaultCategoryId) : fallback);
-  }, [open, kind, defaultCategoryId, catalog]);
+    setCategoryId(defaultCategoryId ? String(defaultCategoryId) : '');
+  }, [open, kind, defaultCategoryId]);
+
+  useEffect(() => {
+    if (!open || isCategory || categoryId || catalog.length === 0) return;
+    setCategoryId(String(catalog[0].id));
+  }, [open, isCategory, categoryId, catalog]);
 
   const handleSave = async () => {
     const trimmed = name.trim();
@@ -79,6 +84,7 @@ export default function AddWasteModal({
     });
     setSaving(false);
     if (outcome.ok) {
+      onCreated?.({ kind, name: trimmed });
       onClose?.();
       return;
     }

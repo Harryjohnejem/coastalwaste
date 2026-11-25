@@ -11,7 +11,7 @@ export async function fetchOverlay(cameraId) {
   try {
     const sep = DETECTOR_OVERLAY_URL.includes('?') ? '&' : '?';
     const res = await fetch(`${DETECTOR_OVERLAY_URL}${sep}camera_id=${id}`, {
-      signal: AbortSignal.timeout(1500),
+      signal: AbortSignal.timeout(10000),
     });
     if (res.ok) {
       const data = await res.json();
@@ -51,28 +51,6 @@ export function overlayMetaFromPayload(data, cameraId) {
   };
 }
 
-const DETECTOR_OVERLAY_URL =
-  import.meta.env.VITE_DETECTOR_OVERLAY_URL || 'http://127.0.0.1:8092/overlay';
-
-async function fetchOverlay(cameraId) {
-  try {
-    const res = await fetch(DETECTOR_OVERLAY_URL, {
-      signal: AbortSignal.timeout(600),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data && Array.isArray(data.boxes)) return data;
-    }
-  } catch {
-    /* detector not running — do not hit Vite /overlay (that spams ECONNREFUSED) */
-  }
-  try {
-    return await detectionsApi.getLiveOverlay(cameraId);
-  } catch {
-    return { boxes: [] };
-  }
-}
-
 /**
  * Local overlay poll for one camera (grid tiles). Does not touch the
  * active-camera store, so CAM-01 and CAM-02 never share boxes.
@@ -96,35 +74,36 @@ export function useStreamOverlay({ enabled, cameraId, intervalMs = OVERLAY_POLL_
         const data = await fetchOverlay(cameraId);
         if (cancelled) return;
         if (!data || (data.error && !Array.isArray(data.boxes))) {
-          setState({
-            boxes: [],
+          setState((prev) => ({
+            boxes: prev.boxes,
             meta: overlayMetaFromPayload({
               camera_id: cameraId,
-              boxes: [],
+              boxes: prev.boxes,
               connected: false,
               error: data?.error || 'Detector is not responding.',
             }, cameraId),
-          });
+          }));
           return;
         }
         const returned = String(data.camera_id || '').toUpperCase();
         const wanted = String(cameraId || '').toUpperCase();
         if (returned && wanted && returned !== wanted) return;
+        const off = data.detection_enabled === false;
         setState({
-          boxes: Array.isArray(data.boxes) ? data.boxes : [],
+          boxes: off ? [] : (Array.isArray(data.boxes) ? data.boxes : []),
           meta: overlayMetaFromPayload(data, cameraId),
         });
       } catch {
         if (!cancelled) {
-          setState({
-            boxes: [],
+          setState((prev) => ({
+            boxes: prev.boxes,
             meta: overlayMetaFromPayload({
               camera_id: cameraId,
-              boxes: [],
+              boxes: prev.boxes,
               connected: false,
               error: 'Detector is not responding.',
             }, cameraId),
-          });
+          }));
         }
       } finally {
         inFlight = false;
@@ -185,12 +164,9 @@ export function useYoloOverlay({ enabled, cameraId }) {
         const data = await fetchOverlay(cameraId);
         if (cancelled) return;
         if (!data || (data.error && !Array.isArray(data.boxes))) {
-          setOverlayBoxes([]);
           setOverlayKnown(true);
-          setInferenceMs(null);
           setOverlayMeta(overlayMetaFromPayload({
             camera_id: cameraId,
-            boxes: [],
             connected: false,
             error: data?.error || 'Detector is not responding.',
           }, cameraId));
@@ -200,7 +176,8 @@ export function useYoloOverlay({ enabled, cameraId }) {
         const wanted = String(cameraId || '').toUpperCase();
         if (returned && wanted && returned !== wanted) return;
 
-        const boxes = Array.isArray(data.boxes) ? data.boxes : [];
+        const off = data.detection_enabled === false;
+        const boxes = off ? [] : (Array.isArray(data.boxes) ? data.boxes : []);
         setOverlayBoxes(boxes);
         setOverlayKnown(true);
         setInferenceMs(data.inference_ms ?? data.detect_to_publish_ms ?? null);
@@ -208,11 +185,9 @@ export function useYoloOverlay({ enabled, cameraId }) {
         setOverlayMeta(overlayMetaFromPayload(data, cameraId));
       } catch {
         if (!cancelled) {
-          setOverlayBoxes([]);
           setOverlayKnown(true);
           setOverlayMeta(overlayMetaFromPayload({
             camera_id: cameraId,
-            boxes: [],
             connected: false,
             error: 'Detector is not responding.',
           }, cameraId));

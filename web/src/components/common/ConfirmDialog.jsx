@@ -5,6 +5,7 @@ import { useNoticeStore } from '../../stores/useNoticeStore';
 export default function ConfirmDialog() {
   const confirming = useNoticeStore((s) => s.confirming);
   const finishConfirm = useNoticeStore((s) => s.finishConfirm);
+  const hideBusy = useNoticeStore((s) => s.hideBusy);
 
   const open = Boolean(confirming);
   const variant = confirming?.variant || 'info';
@@ -14,7 +15,11 @@ export default function ConfirmDialog() {
   const glyphType = variant === 'danger' ? 'error' : variant;
 
   const cancel = () => {
-    if (busy) return;
+    // While working, × just closes the window; the work keeps going and its result shows as a toast.
+    if (busy) {
+      hideBusy();
+      return;
+    }
     finishConfirm(ack ? true : false);
   };
   const accept = () => {
@@ -33,7 +38,6 @@ export default function ConfirmDialog() {
               type="button"
               onClick={cancel}
               aria-label="Close"
-              disabled={busy}
             >
               ×
             </button>

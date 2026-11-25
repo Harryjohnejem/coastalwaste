@@ -1,4 +1,6 @@
 import { useNavStore } from '../../stores/useNavStore';
+import { useAuthStore } from '../../stores/useAuthStore';
+import { usePageSwitchStore } from '../../stores/usePageSwitchStore';
 
 const MODULES = [
   {
@@ -46,6 +48,8 @@ const MODULES = [
 export default function SideMenu() {
   const module = useNavStore((s) => s.module);
   const setModule = useNavStore((s) => s.setModule);
+  const startSwitch = usePageSwitchStore((s) => s.start);
+  const isAdmin = String(useAuthStore((s) => s.user?.role) || '').toLowerCase() === 'admin';
 
   return (
     <aside className="side-menu">
@@ -69,6 +73,13 @@ export default function SideMenu() {
             </button>
           ))}
         </nav>
+        {isAdmin ? (
+          <div className="side-menu-foot">
+            <button type="button" className="side-menu-switch" onClick={() => startSwitch('/today', 'Loading Main Dashboard…')}>
+              Switch to Main Dashboard
+            </button>
+          </div>
+        ) : null}
       </div>
     </aside>
   );

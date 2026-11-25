@@ -3,23 +3,27 @@ import { useNavigate } from 'react-router-dom';
 import Modal from '../common/Modal';
 import Switch from '../common/Switch';
 import RangeField from '../common/RangeField';
-import ChipSet from '../common/ChipSet';
-import AppNotice from '../common/AppNotice';
+import FilterSelect from '../common/FilterSelect';
 import { useSettingsStore } from '../../stores/useSettingsStore';
+import { useClassesStore } from '../../stores/useClassesStore';
 import { useCameraStore } from '../../stores/useCameraStore';
 import { useAuthStore } from '../../stores/useAuthStore';
-import { acknowledgeAction, confirmAction, confirmThenRun } from '../../stores/useNoticeStore';
-import { LIVE_MODEL_NAME, MODEL_OPTIONS, WASTE_CLASSES } from '../../constants';
-
-const CLASS_OPTIONS = WASTE_CLASSES;
+import { useNavStore } from '../../stores/useNavStore';
+import { confirmAction, notice, actionErrorMessage } from '../../stores/useNoticeStore';
+import {
+  DEFAULT_RECORDING_SECONDS,
+  LIVE_DETECTION_CLASSES,
+  LIVE_MODEL_NAME,
+  RECORDING_LENGTH_OPTIONS,
+} from '../../constants';
+import AddWasteModal from '../detections/AddWasteModal';
 
 const TABS = [
-  { id: 'camera', label: 'Camera source', icon: 'cam' },
+  { id: 'camera', label: 'Cameras', icon: 'cam' },
   { id: 'detection', label: 'Detection', icon: 'det' },
-  { id: 'recording', label: 'Recording Conditions', icon: 'rec' },
-  { id: 'alerts', label: 'Alerts & reports', icon: 'alert' },
-  { id: 'system', label: 'Station & storage', icon: 'sys' },
-  { id: 'quota', label: 'Waste quota', icon: 'quota' },
+  { id: 'recording', label: 'Recording', icon: 'rec' },
+  { id: 'alerts', label: 'Notifications', icon: 'alert' },
+  { id: 'system', label: 'Station', icon: 'sys' },
   { id: 'catalog', label: 'Waste catalog', icon: 'catalog' },
 ];
 
@@ -55,16 +59,6 @@ function TabIcon({ name }) {
       </svg>
     );
   }
-  if (name === 'quota') {
-    return (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-        <path d="M12 20V10" />
-        <path d="M18 20V4" />
-        <path d="M6 20v-4" />
-        <path d="M3 20h18" />
-      </svg>
-    );
-  }
   if (name === 'catalog') {
     return (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -80,31 +74,26 @@ function TabIcon({ name }) {
   );
 }
 
-const DEFAULT_QUOTA_FORM = {
-  id: null,
-  name: 'Daily coastal quota · Paco Beach',
-  quota_limit: 50,
-  period: 'daily',
-  cleanup_recommendation:
-    'Conduct cleanup within the next hour along Paco Beach, Barangay Gracia.',
-  is_active: true,
-};
-
-export default function SettingsModal({ onTestStream }) {
+export default function SettingsModal() {
   const navigate = useNavigate();
   const open = useSettingsStore((s) => s.settingsOpen);
   const closeSettings = useSettingsStore((s) => s.closeSettings);
   const settings = useSettingsStore((s) => s.settings);
+  // Re-render when the live class list changes (a deployed model with new classes).
+  useClassesStore((s) => s.version);
   const saveSettings = useSettingsStore((s) => s.saveSettings);
   const settingsSaving = useSettingsStore((s) => s.settingsSaving);
   const settingsLoading = useSettingsStore((s) => s.settingsLoading);
   const settingsTab = useSettingsStore((s) => s.settingsTab);
-  const setStreamStatus = useCameraStore((s) => s.setStreamStatus);
+  const wasteCatalog = useSettingsStore((s) => s.wasteCatalog);
+  const fetchWasteCatalog = useSettingsStore((s) => s.fetchWasteCatalog);
+  const cameras = useCameraStore((s) => s.cameras);
   const logout = useAuthStore((s) => s.logout);
+  const setModule = useNavStore((s) => s.setModule);
 
   const [tab, setTab] = useState('camera');
   const [form, setForm] = useState(settings);
-  const [testError, setTestError] = useState('');
+  const [addKind, setAddKind] = useState(null);
   const hydratedRef = useRef(false);
 
   const handleLogout = async () => {
@@ -120,6 +109,12 @@ export default function SettingsModal({ onTestStream }) {
     navigate('/login', { replace: true });
   };
 
+  // Opening Settings reloads them, so the Model line names the model the
+  // cameras run now (it changes on Deploy and Rollback, e.g. "local-ruwza-dgl85 v5").
+  useEffect(() => {
+    if (open) useSettingsStore.getState().fetchSettings();
+  }, [open]);
+
   useEffect(() => {
     if (!open) {
       hydratedRef.current = false;
@@ -128,25 +123,22 @@ export default function SettingsModal({ onTestStream }) {
     if (hydratedRef.current) return undefined;
     if (settingsLoading) return undefined;
     hydratedRef.current = true;
-    const selected = settings?.detection?.classes || [];
-    const savedDatasetClasses =
-      selected.length > 0 && selected.every((name) => WASTE_CLASSES.includes(name));
     setForm({
       ...settings,
       detection: {
         ...settings.detection,
-        classes: savedDatasetClasses ? selected : [...WASTE_CLASSES],
-        model: MODEL_OPTIONS.includes(settings.detection?.model)
-          ? settings.detection.model
-          : LIVE_MODEL_NAME,
+        classes: [...LIVE_DETECTION_CLASSES],
+        model: LIVE_MODEL_NAME,
       },
       recording: {
         record_confidence: 0.8,
-        min_confirmation_frames: 3,
         track_lost_timeout: 3,
-        detection_cooldown: 10,
         prevent_duplicate: true,
         ...settings.recording,
+      },
+      station: {
+        ...settings.station,
+        name: settings.station?.name || 'Brgy. Gracia',
       },
     });
     const nextTab =
@@ -154,9 +146,14 @@ export default function SettingsModal({ onTestStream }) {
         ? settingsTab
         : 'camera';
     setTab(nextTab);
-    setTestError('');
     return undefined;
   }, [open, settings, settingsLoading, settingsTab]);
+
+  useEffect(() => {
+    if (!open || tab !== 'catalog') return undefined;
+    fetchWasteCatalog();
+    return undefined;
+  }, [open, tab, fetchWasteCatalog]);
 
   const patch = (section, key, value) => {
     setForm((f) => ({
@@ -165,63 +162,54 @@ export default function SettingsModal({ onTestStream }) {
     }));
   };
 
-  const handleTest = async () => {
-    setTestError('');
-    const url = form.stream?.url?.trim();
-    if (!url) {
-      const msg = 'Set a camera stream URL before testing.';
-      setTestError(msg);
-      await acknowledgeAction({ title: 'Cannot test stream', message: msg, variant: 'warning' });
-      return;
-    }
-    await confirmThenRun({
-      skipConfirm: true,
-      busyTitle: 'Testing stream',
-      busyMessage: 'Checking the camera stream URL.',
-      busyLabel: 'Testing…',
-      successTitle: 'Test started',
-      successMessage: 'Connection test started.',
-      errorTitle: 'Test failed',
-      work: async () => {
-        setStreamStatus('CONNECTING…');
-        onTestStream?.(url, form.stream?.protocol);
-      },
-    });
+  const openCameras = () => {
+    closeSettings();
+    setModule('cameras');
   };
 
   const handleSave = async () => {
     const detectionConf = Math.min(0.98, Math.max(0.8, Number(form.detection?.confidence ?? 0.8)));
-    const reviewConf = Math.min(0.79, Math.max(0.25, Number(form.detection?.review_confidence ?? 0.5)));
+    const reviewConf = Math.min(0.79, Math.max(0.25, Number(form.detection?.review_confidence ?? 0.6)));
     const recordConf = Math.min(0.98, Math.max(0.8, Number(form.recording?.record_confidence ?? 0.8)));
-    await confirmThenRun({
+    const stationName = String(form.station?.name || '').trim() || 'Brgy. Gracia';
+    const accepted = await confirmAction({
       title: 'Save configuration?',
       message: 'Detection, recording, and station settings will be updated for this station.',
       confirmLabel: 'Save',
-      busyTitle: 'Saving configuration',
-      busyMessage: 'Updating detection, recording, and station settings.',
-      busyLabel: 'Saving…',
-      successTitle: 'Configuration saved',
-      successMessage: 'Detection, recording, and station settings were updated.',
-      errorTitle: 'Configuration not saved',
-      work: async () => {
-        const ok = await saveSettings({
-          ...form,
-          detection: { ...form.detection, confidence: detectionConf, review_confidence: reviewConf },
-          recording: { ...form.recording, record_confidence: recordConf },
-        });
-        if (!ok) {
-          throw new Error(useSettingsStore.getState().settingsError || 'Could not save settings.');
-        }
+    });
+    if (!accepted) return;
+    const payload = {
+      ...form,
+      detection: {
+        ...form.detection,
+        confidence: detectionConf,
+        review_confidence: reviewConf,
+        classes: [...LIVE_DETECTION_CLASSES],
+        model: LIVE_MODEL_NAME,
+      },
+      recording: { ...form.recording, record_confidence: recordConf },
+      station: { ...form.station, name: stationName },
+    };
+    // Apply at once and close; the server save runs in the background.
+    // The API serves one request at a time, so waiting here felt slow.
+    const previous = useSettingsStore.getState().settings;
+    useSettingsStore.setState({
+      settings: {
+        ...previous,
+        ...payload,
+        detection: { ...previous.detection, ...payload.detection, enabled: previous.detection?.enabled },
       },
     });
-  };
-
-  const toggleClass = (label) => {
-    const classes = form.detection?.classes || [];
-    const next = classes.includes(label)
-      ? classes.filter((c) => c !== label)
-      : [...classes, label];
-    patch('detection', 'classes', next);
+    closeSettings();
+    notice.info('Saving configuration', 'Your changes are applied. Saving them to the station…');
+    try {
+      const ok = await saveSettings(payload);
+      if (!ok) throw new Error(useSettingsStore.getState().settingsError || 'Could not save settings.');
+      notice.success('Configuration saved', 'Detection, recording, and station settings were updated.');
+    } catch (err) {
+      useSettingsStore.setState({ settings: previous });
+      notice.error('Configuration not saved', actionErrorMessage(err, 'Could not save settings. Your previous settings are back.'));
+    }
   };
 
   return (
@@ -253,102 +241,27 @@ export default function SettingsModal({ onTestStream }) {
         <div className="tab-panes">
           {tab === 'camera' && (
             <div className="pane active">
-              <h4>Stream source</h4>
+              <h4>Live cameras</h4>
+              <div className="hint" style={{ marginBottom: 14 }}>
+                The two wide cameras are configured in Cameras. The stream address,
+                protocol, and connection test are saved on the camera, not in this dialog.
+              </div>
+              {cameras.length === 0 ? (
+                <div className="catalog-empty">No cameras are loaded yet.</div>
+              ) : (
+                <ul className="catalog-list">
+                  {cameras.map((camera) => (
+                    <li key={camera.id} className="catalog-item">
+                      <strong>{camera.name || camera.id}</strong>
+                      <p>{camera.location || camera.sector || 'Paco Beach'}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <div className="field">
-                <label htmlFor="cfg-url">Camera stream URL</label>
-                <input
-                  type="text"
-                  id="cfg-url"
-                  placeholder="rtsp://user:pass@192.168.1.64:554/stream1"
-                  value={form.stream?.url || ''}
-                  onChange={(e) => patch('stream', 'url', e.target.value)}
-                />
-                <div className="hint">RTSP, HLS (.m3u8), MJPEG or HTTP snapshot endpoint</div>
-              </div>
-              <div className="field-grid">
-                <div className="field">
-                  <label htmlFor="cfg-protocol">Protocol</label>
-                  <select
-                    id="cfg-protocol"
-                    value={form.stream?.protocol || 'RTSP (via gateway)'}
-                    onChange={(e) => patch('stream', 'protocol', e.target.value)}
-                  >
-                    <option>RTSP (via gateway)</option>
-                    <option>HLS</option>
-                    <option>MJPEG</option>
-                    <option>WebRTC</option>
-                    <option>HTTP snapshot</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label htmlFor="cfg-transport">Transport</label>
-                  <select
-                    id="cfg-transport"
-                    value={form.stream?.transport || 'TCP'}
-                    onChange={(e) => patch('stream', 'transport', e.target.value)}
-                  >
-                    <option>TCP</option>
-                    <option>UDP</option>
-                    <option>Auto</option>
-                  </select>
-                </div>
-              </div>
-              <div className="field-grid">
-                <div className="field">
-                  <label htmlFor="cfg-user">Username</label>
-                  <input
-                    type="text"
-                    id="cfg-user"
-                    placeholder="admin"
-                    value={form.stream?.username || ''}
-                    onChange={(e) => patch('stream', 'username', e.target.value)}
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="cfg-pass">Password</label>
-                  <input
-                    type="password"
-                    id="cfg-pass"
-                    placeholder="••••••••"
-                    value={form.stream?.password || ''}
-                    onChange={(e) => patch('stream', 'password', e.target.value)}
-                  />
-                </div>
-              </div>
-              <h4>Video</h4>
-              <div className="field-grid">
-                <div className="field">
-                  <label htmlFor="cfg-res">Resolution</label>
-                  <select
-                    id="cfg-res"
-                    value={form.stream?.resolution || '1920 × 1080'}
-                    onChange={(e) => patch('stream', 'resolution', e.target.value)}
-                  >
-                    <option>1920 × 1080</option>
-                    <option>1280 × 720</option>
-                    <option>2560 × 1440</option>
-                    <option>3840 × 2160</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label htmlFor="cfg-fps">Frame rate</label>
-                  <select
-                    id="cfg-fps"
-                    value={form.stream?.fps || '25 FPS'}
-                    onChange={(e) => patch('stream', 'fps', e.target.value)}
-                  >
-                    <option>25 FPS</option>
-                    <option>30 FPS</option>
-                    <option>15 FPS</option>
-                    <option>10 FPS</option>
-                  </select>
-                </div>
-              </div>
-              <div className="field">
-                <button className="test-btn" type="button" onClick={handleTest}>
-                  Test connection
+                <button className="test-btn" type="button" onClick={openCameras}>
+                  Open Cameras
                 </button>
-                {testError ? <AppNotice type="warning" title="Stream test" message={testError} /> : null}
               </div>
             </div>
           )}
@@ -357,21 +270,8 @@ export default function SettingsModal({ onTestStream }) {
             <div className="pane active">
               <h4>Model</h4>
               <div className="field">
-                <label htmlFor="cfg-model">Detection model</label>
-                <select
-                  id="cfg-model"
-                  value={
-                    MODEL_OPTIONS.includes(form.detection?.model)
-                      ? form.detection.model
-                      : LIVE_MODEL_NAME
-                  }
-                  onChange={(e) => patch('detection', 'model', e.target.value)}
-                >
-                  {MODEL_OPTIONS.map((name) => (
-                    <option key={name}>{name}</option>
-                  ))}
-                </select>
-                <div className="hint">The live camera runs YOLOv11s ONNX · best.onnx</div>
+                <div className="sw-label">{settings.live_model?.label || LIVE_MODEL_NAME}</div>
+                <div className="hint">This is the model running on the live cameras. It is not switched from here.</div>
               </div>
               <div className="field">
                 <label htmlFor="cfg-conf">Detection confidence</label>
@@ -383,7 +283,7 @@ export default function SettingsModal({ onTestStream }) {
                   format={(v) => `${v}%`}
                   onChange={(v) => patch('detection', 'confidence', v / 100)}
                 />
-                <div className="hint">Only the 13 dataset classes are drawn, from 80% through 98%. Objects outside the dataset go to Detection Reviews.</div>
+                <div className="hint">A box is drawn when a dataset class reaches this score. The label shows the highest score that object reaches.</div>
               </div>
               <div className="field">
                 <label htmlFor="cfg-review-conf">Review confidence</label>
@@ -391,37 +291,26 @@ export default function SettingsModal({ onTestStream }) {
                   id="cfg-review-conf"
                   min={25}
                   max={79}
-                  value={Math.round((form.detection?.review_confidence ?? 0.5) * 100)}
+                  value={Math.round((form.detection?.review_confidence ?? 0.6) * 100)}
                   format={(v) => `${v}%`}
                   onChange={(v) => patch('detection', 'review_confidence', v / 100)}
                 />
-                <div className="hint">Known-class boxes at or above this score, and below Detection confidence, go to Detection Reviews. They are not saved as live detections.</div>
+                <div className="hint">Scores from this line up to 79% are saved to Detection Reviews automatically (default 60–79%). They are not saved as waste detections; 80% and up go to Waste Detections.</div>
               </div>
-              <div className="field">
-                <label htmlFor="cfg-interval">Inference interval</label>
-                <RangeField
-                  id="cfg-interval"
-                  min={1}
-                  max={30}
-                  value={form.detection?.interval ?? 5}
-                  format={(v) => `${v} fr`}
-                  onChange={(v) => patch('detection', 'interval', v)}
-                />
-                <div className="hint">Run detection every N frames to save compute</div>
+              <h4>Dataset classes</h4>
+              <div className="hint" style={{ marginBottom: 14 }}>
+                The live model detects these {LIVE_DETECTION_CLASSES.length} classes on every camera. A class cannot be turned off from here.
               </div>
-              <h4>Waste classes</h4>
-              <div className="field">
-                <ChipSet
-                  options={CLASS_OPTIONS}
-                  selected={form.detection?.classes || []}
-                  onToggle={toggleClass}
-                />
+              <div className="catalog-chips">
+                {LIVE_DETECTION_CLASSES.map((name) => (
+                  <span key={name} className="catalog-chip">{name}</span>
+                ))}
               </div>
               <h4>Overlay</h4>
               <div className="switch-row">
                 <div>
                   <div className="sw-label">Show bounding boxes</div>
-                  <div className="sw-sub">Draw detection boxes on the live feed</div>
+                  <div className="sw-sub">Draw detection boxes on the live camera</div>
                 </div>
                 <Switch
                   checked={form.detection?.showBoxes !== false}
@@ -431,7 +320,7 @@ export default function SettingsModal({ onTestStream }) {
               <div className="switch-row">
                 <div>
                   <div className="sw-label">Show confidence scores</div>
-                  <div className="sw-sub">Display model confidence on each label</div>
+                  <div className="sw-sub">Show the highest percentage on each box</div>
                 </div>
                 <Switch
                   checked={form.detection?.showConfidence !== false}
@@ -443,9 +332,9 @@ export default function SettingsModal({ onTestStream }) {
 
           {tab === 'recording' && (
             <div className="pane active">
-              <h4>Recording conditions</h4>
+              <h4>When a detection is saved</h4>
               <div className="field">
-                <label htmlFor="cfg-record-conf">Record confidence threshold</label>
+                <label htmlFor="cfg-record-conf">Record confidence</label>
                 <RangeField
                   id="cfg-record-conf"
                   min={80}
@@ -454,19 +343,7 @@ export default function SettingsModal({ onTestStream }) {
                   format={(v) => `${v}%`}
                   onChange={(v) => patch('recording', 'record_confidence', v / 100)}
                 />
-                <div className="hint">A dataset class is saved only when its score is inside 80–98%.</div>
-              </div>
-              <div className="field">
-                <label htmlFor="cfg-confirm-frames">Minimum confirmation frames</label>
-                <RangeField
-                  id="cfg-confirm-frames"
-                  min={1}
-                  max={10}
-                  value={form.recording?.min_confirmation_frames ?? 3}
-                  format={(v) => `${v} fr`}
-                  onChange={(v) => patch('recording', 'min_confirmation_frames', v)}
-                />
-                <div className="hint">Required consecutive frames before recording.</div>
+                <div className="hint">A row is written on the first look at or above this score. The stored percentage is the highest score that object reaches. A later higher look updates the same row.</div>
               </div>
               <div className="field">
                 <label htmlFor="cfg-track-timeout">Track lost timeout</label>
@@ -478,19 +355,12 @@ export default function SettingsModal({ onTestStream }) {
                   format={(v) => `${v}s`}
                   onChange={(v) => patch('recording', 'track_lost_timeout', v)}
                 />
-                <div className="hint">Time before a lost track is treated as a new tracking event.</div>
-              </div>
-              <div className="switch-row">
-                <div>
-                  <div className="sw-label">Detection cooldown</div>
-                  <div className="sw-sub">Cooldown used by the current recording logic.</div>
-                </div>
-                <span className="range-val">{form.recording?.detection_cooldown ?? 10}s</span>
+                <div className="hint">How long a missing object stays the same track before a new sighting can be saved.</div>
               </div>
               <div className="switch-row">
                 <div>
                   <div className="sw-label">Prevent duplicate recordings</div>
-                  <div className="sw-sub">Prevents repeated recording of the same tracked object.</div>
+                  <div className="sw-sub">Keep one Waste Detections row for each tracked object</div>
                 </div>
                 <Switch
                   checked={form.recording?.prevent_duplicate !== false}
@@ -500,20 +370,59 @@ export default function SettingsModal({ onTestStream }) {
               <div className="switch-row">
                 <div>
                   <div className="sw-label">Save detection snapshots</div>
-                  <div className="sw-sub">Stores an image for confirmed detections. Managed from Station &amp; storage.</div>
+                  <div className="sw-sub">Store an image with each saved detection</div>
                 </div>
-                <span className="range-val">{form.station?.saveSnapshots !== false ? 'ON' : 'OFF'}</span>
+                <Switch
+                  checked={form.station?.saveSnapshots !== false}
+                  onChange={(v) => patch('station', 'saveSnapshots', v)}
+                />
+              </div>
+
+              <h4>Recording option</h4>
+              <div className="switch-row recording-length-row">
+                <div className="recording-length-text">
+                  <div className="sw-label">Clip recording length</div>
+                  <div className="sw-sub">
+                    The Record button on Live Monitoring stops and saves the clip after this time.
+                    Tap Stop to end it sooner.
+                  </div>
+                </div>
+                <div className="recording-length-select">
+                  <FilterSelect
+                    id="recording-length"
+                    value={String(form.recording?.clip_max_seconds ?? DEFAULT_RECORDING_SECONDS)}
+                    options={RECORDING_LENGTH_OPTIONS.map((o) => ({
+                      value: String(o.seconds),
+                      label: o.label,
+                    }))}
+                    onChange={(v) => patch('recording', 'clip_max_seconds', Number(v))}
+                  />
+                </div>
               </div>
             </div>
           )}
 
           {tab === 'alerts' && (
             <div className="pane active">
-              <h4>Alert triggers</h4>
+              <h4>Notifications</h4>
+              <div className="hint">
+                The bell in the top bar lists cleanup alerts and other notices for the administrator.
+              </div>
               <div className="switch-row">
                 <div>
-                  <div className="sw-label">Density threshold alerts</div>
-                  <div className="sw-sub">Notify when sector debris density exceeds limit</div>
+                  <div className="sw-label">Notify on every new detection</div>
+                  <div className="sw-sub">One notice per saved waste record (class, camera, location). Off keeps the bell for cleanup alerts.</div>
+                </div>
+                <Switch
+                  checked={form.alerts?.detectionAlerts === true}
+                  onChange={(v) => patch('alerts', 'detectionAlerts', v)}
+                />
+              </div>
+              <h4>Cleanup threshold</h4>
+              <div className="switch-row">
+                <div>
+                  <div className="sw-label">Cleanup alerts</div>
+                  <div className="sw-sub">Warn when waste still on the beach builds up, and alert when a camera is full</div>
                 </div>
                 <Switch
                   checked={form.alerts?.densityAlerts !== false}
@@ -521,35 +430,30 @@ export default function SettingsModal({ onTestStream }) {
                 />
               </div>
               <div className="field">
-                <label htmlFor="cfg-density">Density threshold</label>
+                <label htmlFor="cfg-cleanup-limit">Cleanup limit per camera</label>
                 <RangeField
-                  id="cfg-density"
-                  min={10}
+                  id="cfg-cleanup-limit"
+                  min={5}
                   max={100}
-                  value={form.alerts?.densityThreshold ?? 70}
+                  value={Number(form.alerts?.cleanupLimit ?? 20)}
+                  format={(v) => `${v} items`}
+                  onChange={(v) => patch('alerts', 'cleanupLimit', v)}
+                />
+                <div className="hint">When this many waste items are still on the beach in one camera view, the camera is full and a cleanup team is needed.</div>
+              </div>
+              <div className="field">
+                <label htmlFor="cfg-cleanup-warn">Warning level</label>
+                <RangeField
+                  id="cfg-cleanup-warn"
+                  min={50}
+                  max={95}
+                  value={Number(form.alerts?.densityThreshold ?? 70)}
                   format={(v) => `${v}%`}
                   onChange={(v) => patch('alerts', 'densityThreshold', v)}
                 />
-              </div>
-              <div className="switch-row">
-                <div>
-                  <div className="sw-label">Large-item alerts</div>
-                  <div className="sw-sub">Immediate alert for nets, drums, tires</div>
+                <div className="hint">
+                  An early warning at {Math.max(1, Math.ceil((Number(form.alerts?.cleanupLimit ?? 20) * Number(form.alerts?.densityThreshold ?? 70)) / 100))} items, so the team can plan before the beach is full.
                 </div>
-                <Switch
-                  checked={form.alerts?.largeItemAlerts !== false}
-                  onChange={(v) => patch('alerts', 'largeItemAlerts', v)}
-                />
-              </div>
-              <div className="switch-row">
-                <div>
-                  <div className="sw-label">Camera offline alerts</div>
-                  <div className="sw-sub">Notify when a stream drops for &gt; 60 s</div>
-                </div>
-                <Switch
-                  checked={form.alerts?.offlineAlerts !== false}
-                  onChange={(v) => patch('alerts', 'offlineAlerts', v)}
-                />
               </div>
             </div>
           )}
@@ -565,164 +469,17 @@ export default function SettingsModal({ onTestStream }) {
                   value={form.station?.name || ''}
                   onChange={(e) => patch('station', 'name', e.target.value)}
                 />
+                <div className="hint">Shown in the top bar. Each camera keeps its own location, such as Paco Beach.</div>
               </div>
-              <div className="field-grid">
-                <div className="field">
-                  <label htmlFor="cfg-lat">Latitude</label>
-                  <input
-                    type="text"
-                    id="cfg-lat"
-                    value={form.station?.lat || ''}
-                    onChange={(e) => patch('station', 'lat', e.target.value)}
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="cfg-lon">Longitude</label>
-                  <input
-                    type="text"
-                    id="cfg-lon"
-                    value={form.station?.lon || ''}
-                    onChange={(e) => patch('station', 'lon', e.target.value)}
-                  />
-                </div>
-              </div>
-              <div className="field">
-                <label htmlFor="cfg-tz">Timezone</label>
-                <select
-                  id="cfg-tz"
-                  value={form.station?.timezone || 'Asia/Manila (UTC+8)'}
-                  onChange={(e) => patch('station', 'timezone', e.target.value)}
-                >
-                  <option>Asia/Manila (UTC+8)</option>
-                  <option>UTC</option>
-                </select>
-              </div>
-              <h4>Recording &amp; storage</h4>
-              <div className="switch-row">
-                <div>
-                  <div className="sw-label">Save detection snapshots</div>
-                  <div className="sw-sub">Store a frame for every confirmed detection</div>
-                </div>
-                <Switch
-                  checked={form.station?.saveSnapshots !== false}
-                  onChange={(v) => patch('station', 'saveSnapshots', v)}
-                />
-              </div>
-              <div className="field-grid">
-                <div className="field">
-                  <label htmlFor="cfg-retention">Retention period</label>
-                  <select
-                    id="cfg-retention"
-                    value={form.station?.retention || '30 days'}
-                    onChange={(e) => patch('station', 'retention', e.target.value)}
-                  >
-                    <option>30 days</option>
-                    <option>14 days</option>
-                    <option>90 days</option>
-                    <option>Keep forever</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label htmlFor="cfg-clip">Clip length</label>
-                  <select
-                    id="cfg-clip"
-                    value={form.station?.clipLength || '30 seconds'}
-                    onChange={(e) => patch('station', 'clipLength', e.target.value)}
-                  >
-                    <option>30 seconds</option>
-                    <option>60 seconds</option>
-                    <option>2 minutes</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {tab === 'quota' && (
-            <div className="pane active">
-              <h4>Waste quota</h4>
-              <div className="hint" style={{ marginBottom: 14 }}>
-                Monitor accumulated detections against a configured limit. When the quota is reached,
-                the dashboard alerts the administrator with a cleanup recommendation.
-              </div>
-              {quotaForm.status && (
-                <div className={`quota-cfg-status is-${quotaForm.status}`}>
-                  <span>
-                    {quotaForm.current_count ?? 0} detected · {quotaForm.remaining ?? quotaForm.quota_limit} remaining
-                    {' '}({Math.min(100, quotaForm.percent || 0)}%)
-                  </span>
-                  <strong>
-                    {quotaForm.status === 'reached'
-                      ? 'Quota reached'
-                      : quotaForm.status === 'approaching'
-                        ? 'Approaching quota'
-                        : 'Within quota'}
-                  </strong>
-                </div>
-              )}
-              <div className="switch-row">
-                <div>
-                  <div className="sw-label">Enable waste quota</div>
-                  <div className="sw-sub">Compare detections to the limit and raise alerts</div>
-                </div>
-                <Switch
-                  checked={quotaForm.is_active !== false}
-                  onChange={(v) => patchQuota('is_active', v)}
-                />
-              </div>
-              <div className="field">
-                <label htmlFor="cfg-quota-name">Quota name</label>
-                <input
-                  type="text"
-                  id="cfg-quota-name"
-                  value={quotaForm.name}
-                  onChange={(e) => patchQuota('name', e.target.value)}
-                />
-              </div>
-              <div className="field-grid">
-                <div className="field">
-                  <label htmlFor="cfg-quota-limit">Quota limit</label>
-                  <input
-                    type="number"
-                    id="cfg-quota-limit"
-                    min="1"
-                    value={quotaForm.quota_limit}
-                    onChange={(e) => patchQuota('quota_limit', e.target.value)}
-                  />
-                  <div className="hint">Accumulated waste items in the selected period</div>
-                </div>
-                <div className="field">
-                  <label htmlFor="cfg-quota-period">Period</label>
-                  <select
-                    id="cfg-quota-period"
-                    value={quotaForm.period}
-                    onChange={(e) => patchQuota('period', e.target.value)}
-                  >
-                    <option value="daily">Daily</option>
-                    <option value="weekly">Weekly</option>
-                    <option value="monthly">Monthly</option>
-                  </select>
-                </div>
-              </div>
-              <div className="field">
-                <label htmlFor="cfg-quota-rec">Cleanup recommendation</label>
-                <textarea
-                  id="cfg-quota-rec"
-                  rows={3}
-                  value={quotaForm.cleanup_recommendation}
-                  onChange={(e) => patchQuota('cleanup_recommendation', e.target.value)}
-                />
-                <div className="hint">Shown when the quota is reached. Does not schedule cleanup.</div>
-              </div>
-              {quotaError ? <div className="field-error">{quotaError}</div> : null}
             </div>
           )}
 
           {tab === 'catalog' && (
             <div className="pane active">
-              <h4>Waste categories &amp; classifications</h4>
+              <h4>Waste categories and classifications</h4>
               <div className="hint" style={{ marginBottom: 14 }}>
-                These names appear in Waste Detections filters. Add a category first, then add
+                Saved names appear in Waste Detections, Detection Reviews, and reports. They do not
+                change the {LIVE_DETECTION_CLASSES.length} classes the live model detects. Add a category first, then add
                 classifications under it.
               </div>
               <div className="catalog-actions">

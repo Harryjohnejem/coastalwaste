@@ -1,8 +1,15 @@
-import { CATEGORY_BY_CLASS, PARENT_CATEGORIES, WASTE_CLASSES } from '../constants';
+import { CATEGORY_BY_CLASS, LIVE_EXCLUDED_CLASSES, PARENT_CATEGORIES, WASTE_CLASSES } from '../constants';
 import { createReport } from '../api/reports';
 
-const DATASET_CLASSES = WASTE_CLASSES;
-const DATE_ROW_COUNT = 31;
+/**
+ * Classes on the report: every known class (the model's and the waste
+ * catalog's) except the excluded ones. Read each time, so new classes show.
+ */
+function datasetClasses() {
+  return WASTE_CLASSES.filter((name) => !LIVE_EXCLUDED_CLASSES.includes(name));
+}
+/** Dates listed by name on the form; older dates are summed in one row so it fits one long bond page. */
+const DATE_ROW_COUNT = 3;
 
 const REPORT_FOOTER =
   'This report contains all waste detections recorded during the selected monitoring period. For additional details, captured images, and interactive analytics, please access the Coastal Waste Monitoring and Reporting System dashboard.';
@@ -30,15 +37,23 @@ function qty(d) {
 }
 
 export function datasetClassOf(det) {
-  const raw = String(det?.dataset_class || det?.class || '').trim();
-  return DATASET_CLASSES.find((name) => name.toLowerCase() === raw.toLowerCase()) || '';
+  const raw = String(det?.dataset_class || det?.waste_subtype || det?.class || '').trim();
+  if (!raw) return '';
+  return datasetClasses().find((name) => name.toLowerCase() === raw.toLowerCase()) || raw;
 }
 
 export function parentCategoryOf(det) {
   const name = datasetClassOf(det);
   if (name && CATEGORY_BY_CLASS[name]) return CATEGORY_BY_CLASS[name];
-  const parent = String(det?.parent_category || '').trim();
-  return PARENT_CATEGORIES.includes(parent) ? parent : '';
+  return String(det?.waste_category || det?.parent_category || '').trim();
+}
+
+function namesInOrder(preferred, counts, { onlyPositiveExtras = false } = {}) {
+  const extras = Object.keys(counts || {}).filter((name) => {
+    if (preferred.includes(name)) return false;
+    return onlyPositiveExtras ? (counts[name] || 0) > 0 : true;
+  });
+  return [...preferred, ...extras];
 }
 
 function categoryCounts(detections) {
@@ -46,7 +61,7 @@ function categoryCounts(detections) {
   (detections || []).forEach((d) => {
     const name = parentCategoryOf(d);
     if (!name) return;
-    counts[name] += qty(d);
+    counts[name] = (counts[name] || 0) + qty(d);
   });
   return counts;
 }
@@ -65,17 +80,26 @@ function detectionDateKey(d) {
   return m ? m[1] : String(raw).slice(0, 10) || '—';
 }
 
-function cameraList(detections) {
+/**
+ * Cameras named on the form. `selected` is what the report was made for
+ * (All Cameras -> every camera; one camera -> that camera), so the form shows
+ * it even when the period has no records. Without it, the cameras in the records.
+ */
+function cameraList(detections, selected) {
+  const chosen = (Array.isArray(selected) ? selected : String(selected || '').split(','))
+    .map((id) => String(id || '').trim())
+    .filter(Boolean);
+  if (chosen.length) return [...new Set(chosen)].sort().join(', ');
   const ids = [...new Set((detections || []).map((d) => d.camera_id).filter(Boolean))];
-  return ids.length ? ids.join(', ') : 'CAM-01';
+  return ids.length ? ids.sort().join(', ') : '—';
 }
 
 function classCounts(detections) {
-  const counts = Object.fromEntries(DATASET_CLASSES.map((name) => [name, 0]));
+  const counts = Object.fromEntries(datasetClasses().map((name) => [name, 0]));
   (detections || []).forEach((d) => {
     const name = datasetClassOf(d);
     if (!name) return;
-    counts[name] += qty(d);
+    counts[name] = (counts[name] || 0) + qty(d);
   });
   return counts;
 }
@@ -93,6 +117,8 @@ const CLASS_ACTIONS = {
     'Confirm whether reusable bags are being discarded at the monitored point and include that location in the next cleanup round.',
   'Plastic Cup':
     'Look for nearby stalls or gathering spots that leave cups, and add that point to the inspection route.',
+  'Plastic Spoon':
+    'Collect plastic spoons on the next shoreline walk and keep them with other small plastic utensils.',
   'Styro Cup':
     'Include styro cups in the next shoreline walk; they fragment easily if left in place.',
   Styrofoam:
@@ -132,9 +158,9 @@ function recommendationFor(top, grand, comparison) {
 export function buildMonitoringNotes(detections, options = {}) {
   const list = (detections || []).filter((d) => datasetClassOf(d));
   const totals = classCounts(list);
-  const ranked = DATASET_CLASSES.filter((name) => totals[name] > 0).sort(
-    (a, b) => totals[b] - totals[a],
-  );
+  const ranked = namesInOrder(datasetClasses(), totals, { onlyPositiveExtras: true })
+    .filter((name) => totals[name] > 0)
+    .sort((a, b) => totals[b] - totals[a]);
   const grand = ranked.reduce((sum, name) => sum + totals[name], 0);
   const avg = avgConfidence(list);
   const periodLabel = options.periodLabel || 'the selected monitoring period';
@@ -153,7 +179,8 @@ export function buildMonitoringNotes(detections, options = {}) {
   const topShare = grand > 0 ? Math.round((totals[top] / grand) * 100) : 0;
   const cameras = [...new Set(list.map((d) => d.camera_id).filter(Boolean))];
   const cameraText = cameras.length ? cameras.join(', ') : 'the configured cameras';
-  const cleaned = list.filter((d) => d.status === 'Confirmed Cleaned').length;
+  const notVisible = list.filter((d) => d.status === 'No Longer Visible' || d.status === 'Confirmed Cleaned').length;
+  const verified = list.filter((d) => d.status === 'Cleaning Verified').length;
   const trendText =
     comparison?.direction === 'up' && comparison.percent != null
       ? `That is ${comparison.percent}% more than the previous equivalent period (${comparison.previous} recorded).`
@@ -168,10 +195,12 @@ export function buildMonitoringNotes(detections, options = {}) {
   const observation = [
     `For ${periodLabel}, ${list.length} recorded detection${list.length === 1 ? '' : 's'} (${grand} item${grand === 1 ? '' : 's'}) were logged at Paco Beach from ${cameraText}.`,
     top ? `${top} was the most frequent classification (${totals[top]} records, ${topShare}% of this view).` : '',
-    PARENT_CATEGORIES.filter((name) => categories[name] > 0)
+    namesInOrder(PARENT_CATEGORIES, categories, { onlyPositiveExtras: true })
+      .filter((name) => categories[name] > 0)
       .map((name) => `${name} ${categories[name]}`)
       .join(', ')
-      ? `Parent categories in this view: ${PARENT_CATEGORIES.filter((name) => categories[name] > 0)
+      ? `Categories in this view: ${namesInOrder(PARENT_CATEGORIES, categories, { onlyPositiveExtras: true })
+          .filter((name) => categories[name] > 0)
           .map((name) => `${name} ${categories[name]}`)
           .join(', ')}.`
       : '',
@@ -179,9 +208,12 @@ export function buildMonitoringNotes(detections, options = {}) {
       ? `Mean detector confidence on these records was ${avg}% (score of the saved detection, not model accuracy).`
       : '',
     trendText,
-    cleaned
-      ? `${cleaned} record${cleaned === 1 ? '' : 's'} ${cleaned === 1 ? 'is' : 'are'} marked Confirmed Cleaned because the object left the camera view — that is inferred disappearance, not verified physical cleaning.`
+    notVisible
+      ? `${notVisible} record${notVisible === 1 ? '' : 's'} ${notVisible === 1 ? 'is' : 'are'} marked No Longer Visible because the object left the camera view — that is inferred disappearance, not verified physical cleaning.`
       : '',
+    verified
+      ? `${verified} record${verified === 1 ? '' : 's'} ${verified === 1 ? 'has' : 'have'} Cleaning Verified, confirmed on site by the Barangay Sanitary Inspector or an authorized administrator.`
+      : 'No record has Cleaning Verified in this period; physical cleaning has not been confirmed by an inspector.',
   ]
     .filter(Boolean)
     .join(' ');
@@ -234,27 +266,28 @@ export function nextReportNumber() {
 }
 
 const REPORT_CSS = `
-  @page { size: A4; margin: 10mm; }
+  /* Margin 0 leaves no room for the browser's own header/footer (about:blank, 1/1); the 8 mm is padding instead. */
+  @page { size: 8.5in 13in; margin: 0; }
   * { box-sizing: border-box; }
-  body { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 11px; margin: 0; background: #fff; }
-  .page { width: 190mm; margin: 0 auto 12mm; border: 1.5px solid #000; }
+  body { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 11px; margin: 0; padding: 8mm; background: #fff; }
+  .page { width: 190mm; margin: 0 auto; border: 1.5px solid #000; }
   .page + .page { page-break-before: always; }
   table { width: 100%; border-collapse: collapse; }
-  td, th { border: 1px solid #000; padding: 6px 8px; vertical-align: middle; }
+  td, th { border: 1px solid #000; padding: 2.5px 8px; vertical-align: middle; }
   .bar { text-align: center; font-weight: 700; letter-spacing: .3px; text-transform: uppercase; }
-  .head { text-align: center; padding: 8px 10px 10px; }
-  .head img { width: 72px; height: 72px; object-fit: contain; display: block; margin: 0 auto 6px; }
+  .head { text-align: center; padding: 6px 10px 6px; }
+  .head img { width: 62px; height: 62px; object-fit: contain; display: block; margin: 0 auto 4px; }
   .loc { font-size: 12px; font-weight: 700; }
   .sys { font-size: 11px; margin-top: 2px; }
   .meta { width: 100%; border-collapse: collapse; }
-  .meta td { border: none; padding: 2px 8px 8px; }
+  .meta td { border: none; padding: 2px 8px 6px; }
   .meta .left { text-align: left; font-weight: 700; }
   .meta .right { text-align: right; font-weight: 700; }
-  .bar-green { background: #6aa84f; color: #000; font-size: 12px; padding: 7px 8px; }
-  .bar-blue { background: #6fa8dc; color: #000; font-size: 12px; padding: 7px 8px; }
-  .bar-gray { background: #cccccc; color: #000; font-size: 12px; padding: 7px 8px; }
-  .bar-rose { background: #dd7e6b; color: #000; font-size: 12px; padding: 7px 8px; }
-  .bar-royal { background: #6d9eeb; color: #000; font-size: 12px; padding: 7px 8px; }
+  .bar-green { background: #6aa84f; color: #000; font-size: 12px; padding: 5px 8px; }
+  .bar-blue { background: #6fa8dc; color: #000; font-size: 12px; padding: 5px 8px; }
+  .bar-gray { background: #cccccc; color: #000; font-size: 12px; padding: 5px 8px; }
+  .bar-rose { background: #dd7e6b; color: #000; font-size: 12px; padding: 5px 8px; }
+  .bar-royal { background: #6d9eeb; color: #000; font-size: 12px; padding: 5px 8px; }
   .sub { text-align: center; font-size: 11px; }
   .sub-gray { background: #d9d9d9; }
   .lbl { font-weight: 700; width: 22%; }
@@ -263,15 +296,110 @@ const REPORT_CSS = `
   .num { text-align: center; font-weight: 600; }
   .empty { height: 22px; }
   .note { font-size: 9px; font-style: italic; color: #333; padding: 6px 8px; border: none; }
-  .obs { min-height: 72px; padding: 8px; font-size: 11px; line-height: 1.45; }
+  .obs { padding: 4px 8px; font-size: 11px; line-height: 1.3; }
   .hint { display: block; margin-top: 18px; font-size: 9px; font-style: italic; color: #555; }
-  .foot { font-size: 8.5px; font-style: italic; padding: 8px 10px 10px; line-height: 1.4; }
+  .foot { font-size: 8.5px; font-style: italic; padding: 6px 10px 6px; line-height: 1.35; }
   @media print { .page { border: 1.5px solid #000; margin: 0; width: auto; } }
 `;
+
+/**
+ * The same numbers as the official form (buildOfficialReportHtml), as plain
+ * data for the digital form on the Main Dashboard.
+ */
+export function buildReportData({
+  generatedBy = 'Administrator',
+  cameras,
+  monitoringPeriod,
+  remarks,
+  recommendations,
+  stats = {},
+  composition = [],
+  detections = [],
+}) {
+  const now = new Date();
+  const list = (detections || []).filter((d) => datasetClassOf(d));
+  const avg = avgConfidence(detections);
+  const totals = classCounts(list);
+  (composition || []).forEach((c) => {
+    const key = datasetClassOf({ class: c.label });
+    if (!key || !datasetClasses().includes(key) || totals[key]) return;
+    if (c.count) totals[key] = Number(c.count) || 0;
+  });
+  const categoryTotals = categoryCounts(list);
+  const grand = Object.values(categoryTotals).reduce((s, n) => s + (n || 0), 0);
+  const period = monitoringPeriod
+    || now.toLocaleDateString('en-PH', { month: 'long', day: 'numeric', year: 'numeric' });
+  const auto = buildMonitoringNotes(list, { periodLabel: period });
+
+  const examples = {};
+  PARENT_CATEGORIES.forEach((category) => {
+    examples[category] = datasetClasses().filter((name) => CATEGORY_BY_CLASS[name] === category);
+  });
+  list.forEach((d) => {
+    const category = parentCategoryOf(d);
+    const name = datasetClassOf(d);
+    if (!category || !name) return;
+    const row = examples[category] || (examples[category] = []);
+    if (!row.some((item) => item.toLowerCase() === name.toLowerCase())) row.push(name);
+  });
+
+  const categories = namesInOrder(PARENT_CATEGORIES, categoryTotals, { onlyPositiveExtras: true });
+  const byDate = {};
+  list.forEach((d) => {
+    const key = detectionDateKey(d);
+    const category = parentCategoryOf(d);
+    if (!key || !category) return;
+    if (!byDate[key]) byDate[key] = categoryCounts([]);
+    byDate[key][category] = (byDate[key][category] || 0) + qty(d);
+  });
+  const dates = Object.keys(byDate).sort().reverse().map((date) => ({
+    date,
+    counts: byDate[date],
+    total: categories.reduce((s, c) => s + (byDate[date][c] || 0), 0),
+  }));
+
+  return {
+    info: {
+      cameras: cameraList(detections, cameras),
+      location: 'Paco Beach, Barangay Gracia',
+      period,
+      generatedAt: now.toLocaleString('en-PH', { dateStyle: 'long', timeStyle: 'short' }),
+      generatedBy: generatedBy || 'Administrator',
+      averageConfidence: avg != null ? `${avg}%` : '—',
+      duration: durationLabel(detections),
+    },
+    summary: categories.map((category) => ({
+      category,
+      classifications: examples[category] || [],
+      total: categoryTotals[category] || 0,
+    })),
+    grandTotal: grand,
+    classes: namesInOrder(datasetClasses(), totals, { onlyPositiveExtras: true }).map((name) => ({
+      name,
+      category: CATEGORY_BY_CLASS[name]
+        || list.map((d) => (datasetClassOf(d) === name ? parentCategoryOf(d) : '')).find(Boolean)
+        || '',
+      count: totals[name] || 0,
+    })),
+    statistics: {
+      records: grand,
+      events: list.length,
+      notVisible: list.filter((d) => d.status === 'No Longer Visible' || d.status === 'Confirmed Cleaned').length,
+      verified: list.filter((d) => d.status === 'Cleaning Verified').length,
+      today: Number(stats.detections ?? 0),
+      allTime: Number(stats.total_detections ?? grand),
+    },
+    categories,
+    dates,
+    observations: remarks || auto.observation,
+    recommendations: recommendations || auto.recommendation,
+  };
+}
 
 export function buildOfficialReportHtml({
   reportNumber,
   generatedBy = 'Barangay Sanitary Inspector',
+  cameras,
   monitoringPeriod,
   remarks,
   recommendations,
@@ -286,17 +414,20 @@ export function buildOfficialReportHtml({
     now.toLocaleDateString('en-PH', { month: 'long', day: 'numeric', year: 'numeric' });
   const avg = avgConfidence(detections);
   const avgLabel = avg != null ? `${avg}%` : '—';
-  const cams = cameraList(detections);
+  const cams = cameraList(detections, cameras);
   const duration = durationLabel(detections);
   const list = (detections || []).filter((d) => datasetClassOf(d));
   const events = list.length;
   const totals = classCounts(list);
   (composition || []).forEach((c) => {
     const key = datasetClassOf({ class: c.label });
-    if (!key || totals[key]) return;
+    // Only real waste classes; category totals like "Plastic" are not rows here.
+    if (!key || !datasetClasses().includes(key) || totals[key]) return;
     if (c.count) totals[key] = Number(c.count) || 0;
   });
-  const grand = PARENT_CATEGORIES.reduce((s, name) => s + (categoryCounts(list)[name] || 0), 0);
+  const grand = Object.values(categoryCounts(list)).reduce((s, name) => s + (name || 0), 0);
+  const notVisibleCount = list.filter((d) => d.status === 'No Longer Visible' || d.status === 'Confirmed Cleaned').length;
+  const verifiedCount = list.filter((d) => d.status === 'Cleaning Verified').length;
   const today = Number(stats.detections ?? 0);
   const allTime = Number(stats.total_detections ?? grand);
 
@@ -309,45 +440,77 @@ export function buildOfficialReportHtml({
       : '/brgy-gracia-seal.jpg';
 
   const categoryTotals = categoryCounts(list);
-  const categoryExamples = Object.fromEntries(
-    PARENT_CATEGORIES.map((category) => [
-      category,
-      DATASET_CLASSES.filter((name) => CATEGORY_BY_CLASS[name] === category).join(', '),
-    ]),
-  );
-  const summaryRows = PARENT_CATEGORIES.map(
+  const categoryExamples = {};
+  list.forEach((detection) => {
+    const category = parentCategoryOf(detection);
+    const name = datasetClassOf(detection);
+    if (!category || !name) return;
+    const current = categoryExamples[category] || [];
+    if (!current.some((item) => item.toLowerCase() === name.toLowerCase())) current.push(name);
+    categoryExamples[category] = current;
+  });
+  PARENT_CATEGORIES.forEach((category) => {
+    const official = datasetClasses().filter((name) => CATEGORY_BY_CLASS[name] === category);
+    const extra = categoryExamples[category] || [];
+    extra.forEach((name) => {
+      if (!official.some((item) => item.toLowerCase() === name.toLowerCase())) official.push(name);
+    });
+    categoryExamples[category] = official;
+  });
+  const summaryRows = namesInOrder(PARENT_CATEGORIES, categoryTotals, { onlyPositiveExtras: true }).map(
     (category) =>
-      `<tr><td>${esc(category)}</td><td colspan="3">${esc(categoryExamples[category])}</td><td colspan="2" class="num">${categoryTotals[category] || 0}</td></tr>`,
+      `<tr><td>${esc(category)}</td><td colspan="3">${esc((categoryExamples[category] || []).join(', '))}</td><td colspan="2" class="num">${categoryTotals[category] || 0}</td></tr>`,
   ).join('');
-  const classRows = DATASET_CLASSES.map((name) => {
-    const category = CATEGORY_BY_CLASS[name];
+  const classRows = namesInOrder(datasetClasses(), totals, { onlyPositiveExtras: true }).map((name) => {
+    const category = CATEGORY_BY_CLASS[name]
+      || list.map((detection) => (datasetClassOf(detection) === name ? parentCategoryOf(detection) : '')).find(Boolean)
+      || '';
     return `<tr><td colspan="3">${esc(name)}</td><td>${esc(category)}</td><td colspan="2" class="num">${totals[name] || 0}</td></tr>`;
   }).join('');
 
+  // The form is 6 columns wide. Up to 4 categories fit as columns (new ones show
+  // even at 0); with more, only categories that have records in this report.
+  const DATE_CATEGORIES = PARENT_CATEGORIES.length <= 4
+    ? [...PARENT_CATEGORIES]
+    : PARENT_CATEGORIES.filter((category) => (categoryTotals[category] || 0) > 0).slice(0, 4);
+  const DATE_SPAN = Math.max(1, 6 - DATE_CATEGORIES.length - 1);
   const byDate = {};
   list.forEach((d) => {
     const key = detectionDateKey(d);
     const category = parentCategoryOf(d);
-    if (!category) return;
+    if (!category || !DATE_CATEGORIES.includes(category)) return;
     if (!byDate[key]) byDate[key] = categoryCounts([]);
     byDate[key][category] += qty(d);
   });
-  const dateKeys = Object.keys(byDate).filter(Boolean).sort().slice(-DATE_ROW_COUNT);
+  const allDateKeys = Object.keys(byDate).filter(Boolean).sort();
+  // Up to 3 date rows fit: all dates when there are 3 or fewer, otherwise the
+  // 2 latest plus one "Earlier" row (so TOTAL still covers every date).
+  const shown = allDateKeys.length <= DATE_ROW_COUNT ? allDateKeys.length : DATE_ROW_COUNT - 1;
+  const dateKeys = allDateKeys.slice(allDateKeys.length - shown);
+  const earlierKeys = allDateKeys.slice(0, allDateKeys.length - shown);
+  if (earlierKeys.length) {
+    const label = `Earlier (${earlierKeys.length} day${earlierKeys.length === 1 ? '' : 's'})`;
+    byDate[label] = categoryCounts([]);
+    earlierKeys.forEach((key) => {
+      DATE_CATEGORIES.forEach((category) => { byDate[label][category] += byDate[key][category] || 0; });
+    });
+    dateKeys.unshift(label);
+  }
   const dateTotals = categoryCounts([]);
   const dateRows = dateKeys
     .map((key) => {
       const row = byDate[key];
       const empty = !key || !row;
-      if (!empty) PARENT_CATEGORIES.forEach((category) => { dateTotals[category] += row[category] || 0; });
-      const total = empty ? 0 : PARENT_CATEGORIES.reduce((s, category) => s + (row[category] || 0), 0);
+      if (!empty) DATE_CATEGORIES.forEach((category) => { dateTotals[category] += row[category] || 0; });
+      const total = empty ? 0 : DATE_CATEGORIES.reduce((s, category) => s + (row[category] || 0), 0);
       return `<tr>
-        <td>${esc(key || '')}</td>
-        ${PARENT_CATEGORIES.map((category) => `<td class="num">${empty ? '' : row[category] || 0}</td>`).join('')}
+        <td colspan="${DATE_SPAN}">${esc(key || '')}</td>
+        ${DATE_CATEGORIES.map((category) => `<td class="num">${empty ? '' : row[category] || 0}</td>`).join('')}
         <td class="num">${empty ? '' : total}</td>
       </tr>`;
     })
     .join('');
-  const dateGrand = PARENT_CATEGORIES.reduce((s, category) => s + dateTotals[category], 0);
+  const dateGrand = DATE_CATEGORIES.reduce((s, category) => s + dateTotals[category], 0);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -408,17 +571,17 @@ export function buildOfficialReportHtml({
         <td class="lbl">Monitoring Location</td><td class="val" colspan="2">Paco Beach, Barangay Gracia</td>
       </tr>
       <tr>
-        <td class="lbl">Monitoring Duration</td><td class="val" colspan="2">${esc(duration)}</td>
-        <td class="lbl">Camera Used</td><td class="val" colspan="2">${esc(cams)}</td>
+        <td class="lbl">No Longer Visible (inferred)</td><td class="val" colspan="2">${esc(notVisibleCount)}</td>
+        <td class="lbl">Cleaning Verified</td><td class="val" colspan="2">${esc(verifiedCount)}</td>
       </tr>
       <tr><td colspan="6" class="bar bar-green">DETECTION SUMMARY BY DATE</td></tr>
       <tr class="yh">
-        <th>Date</th><th>Plastic</th><th>Paper</th><th>Metal</th><th>Glass</th><th>Total</th>
+        <th colspan="${DATE_SPAN}">Date</th>${DATE_CATEGORIES.map((category) => `<th>${esc(category)}</th>`).join('')}<th>Total</th>
       </tr>
       ${dateRows || '<tr><td colspan="6" class="val">No dated records in this report.</td></tr>'}
       <tr>
-        <td><b>TOTAL</b></td>
-        ${PARENT_CATEGORIES.map((category) => `<td class="num"><b>${dateTotals[category]}</b></td>`).join('')}
+        <td colspan="${DATE_SPAN}"><b>TOTAL</b></td>
+        ${DATE_CATEGORIES.map((category) => `<td class="num"><b>${dateTotals[category]}</b></td>`).join('')}
         <td class="num"><b>${dateGrand}</b></td>
       </tr>
       <tr><td colspan="6" class="bar bar-gray">OBSERVATIONS</td></tr>
@@ -432,36 +595,28 @@ export function buildOfficialReportHtml({
 </html>`;
 }
 
+/** Opens the print dialog from inside the report window, so the dashboard is never held up. */
+const SELF_PRINT = '<script>window.addEventListener("load",function(){setTimeout(function(){window.focus();window.print();},150);});</script>';
+
 export function printOfficialReport(html) {
-  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const page = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, `${SELF_PRINT}</body>`) : html + SELF_PRINT;
+  const blob = new Blob([page], { type: 'text/html;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const w = window.open(url, '_blank', 'width=920,height=720');
   if (!w) {
     URL.revokeObjectURL(url);
     return false;
   }
-  let printed = false;
-  const printWhenReady = () => {
-    if (printed) return;
-    printed = true;
-    try {
-      w.focus();
-      w.print();
-    } catch {
-      /* user can File → Print in the report window */
-    }
-  };
-  w.onload = printWhenReady;
-  setTimeout(printWhenReady, 400);
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
   return true;
 }
 
 export async function saveAndPrintReport(payload, html) {
-  printOfficialReport(html);
-  try {
-    return await createReport(payload);
-  } catch {
-    return null;
+  const opened = printOfficialReport(html);
+  if (!opened) {
+    throw new Error('The browser blocked the report window. Allow pop-ups for this site, then try again.');
   }
+  // Record the report in the background; the PDF window does not wait for the server.
+  createReport(payload).catch(() => null);
+  return true;
 }

@@ -123,7 +123,7 @@ class SceneMotionTests(unittest.TestCase):
         updates = book.step({}, result.mask, True)
         self.assertEqual(updates, [])
         updates = book.step({}, result.mask, True)
-        self.assertEqual(updates[0]["status"], "Confirmed Cleaned")
+        self.assertEqual(updates[0]["status"], "No Longer Visible")
 
     def test_summary_serializable_for_debug(self):
         motion = SceneMotion(min_area=50, history=10, var_threshold=16)

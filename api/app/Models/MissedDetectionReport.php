@@ -12,11 +12,45 @@ class MissedDetectionReport extends Model
 
     public const VERIFIED = 'verified';
 
+    public const CORRECTED = 'corrected';
+
     public const APPROVED = 'approved';
 
     public const REJECTED = 'rejected';
 
     public const EXPORTED = 'exported';
+
+    protected $table = 'detection_reviews';
+
+    protected static function booted(): void
+    {
+        // Each annotation carries its review's status.
+        static::saved(function (self $report) {
+            if ($report->wasChanged('status') || $report->wasRecentlyCreated) {
+                $report->annotations()->update(['status' => $report->status]);
+            }
+        });
+    }
+
+    /**
+     * Copy review status onto annotations after a bulk query()->update().
+     *
+     * @param  iterable<int|string>  $reportIds
+     */
+    public static function syncAnnotationStatus(iterable $reportIds): void
+    {
+        $ids = collect($reportIds)->map(fn ($id) => (int) $id)->filter()->values()->all();
+        if ($ids === []) {
+            return;
+        }
+        MissedDetectionAnnotation::query()
+            ->whereIn('report_id', $ids)
+            ->update([
+                'status' => \Illuminate\Support\Facades\DB::raw(
+                    '(SELECT detection_reviews.status FROM detection_reviews WHERE detection_reviews.id = detection_review_annotations.report_id)'
+                ),
+            ]);
+    }
 
     protected $fillable = [
         'user_id',
@@ -25,6 +59,13 @@ class MissedDetectionReport extends Model
         'description',
         'proposal_label',
         'proposal',
+        'original_prediction',
+        'original_prediction_confidence',
+        'original_model_boxes',
+        'corrected_by',
+        'corrected_at',
+        'approved_by',
+        'approved_at',
         'image_path',
         'image_name',
         'status',
@@ -40,6 +81,10 @@ class MissedDetectionReport extends Model
         return [
             'reviewed_at' => 'datetime',
             'proposal' => 'array',
+            'original_model_boxes' => 'array',
+            'original_prediction_confidence' => 'float',
+            'corrected_at' => 'datetime',
+            'approved_at' => 'datetime',
             'include_in_export' => 'boolean',
         ];
     }
@@ -86,10 +131,17 @@ class MissedDetectionReport extends Model
             'training_job_id' => $this->training_job_id,
             'location' => $this->camera?->monitoring_location,
             'image_url' => '/storage/'.$this->image_path,
+            // Small copy for the review table; the modal keeps image_url.
+            'thumb_url' => \App\Support\ReviewThumbnail::url($this->image_path),
             'image_name' => $this->image_name,
             'camera_id' => $this->camera?->camera_code,
             'camera_name' => $this->camera?->camera_name,
             'source_detection_id' => $this->source_detection_id,
+            'original_prediction' => $this->original_prediction ?: $overlay['prediction'],
+            'corrected_by' => $this->corrected_by,
+            'corrected_at' => $this->corrected_at?->toIso8601String(),
+            'approved_by' => $this->approved_by,
+            'approved_at' => $this->approved_at?->toIso8601String(),
             'prediction' => $overlay['prediction'],
             'prediction_confidence' => $overlay['prediction_confidence'],
             'model_boxes' => $overlay['model_boxes'],
@@ -115,6 +167,15 @@ class MissedDetectionReport extends Model
      */
     public function modelOverlay(): array
     {
+        if ($this->original_model_boxes !== null) {
+            return [
+                'prediction' => $this->original_prediction ?: ($this->original_model_boxes[0]['class_name'] ?? null),
+                'prediction_confidence' => $this->original_prediction_confidence !== null
+                    ? (float) $this->original_prediction_confidence
+                    : null,
+                'model_boxes' => $this->original_model_boxes ?? [],
+            ];
+        }
         $detection = $this->relationLoaded('sourceDetection')
             ? $this->sourceDetection
             : $this->sourceDetection()->with(['classification', 'latestObservation'])->first();

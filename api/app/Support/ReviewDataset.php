@@ -37,10 +37,18 @@ class ReviewDataset
         $reports = MissedDetectionReport::query()
             ->with('annotations')
             ->whereIn('id', $reportIds)
+            ->whereIn('status', [MissedDetectionReport::APPROVED, MissedDetectionReport::EXPORTED])
+            ->where('include_in_export', true)
             ->orderBy('id')
             ->get();
+        $result = self::build($reports);
+        $found = $reports->pluck('id')->map(fn ($id) => (int) $id)->all();
+        $missing = array_values(array_diff(array_map('intval', $reportIds), $found));
+        foreach ($missing as $id) {
+            $result['issues'][] = "Report {$id} is no longer approved for training.";
+        }
 
-        return self::build($reports);
+        return $result;
     }
 
     /**
@@ -53,7 +61,7 @@ class ReviewDataset
         $issues = [];
         $items = [];
         $seenImages = [];
-        $allowed = WasteClassMap::CLASSES;
+        $allowed = WasteClassMap::classes();
 
         foreach ($reports as $index => $report) {
             if (! $report->image_path || ! Storage::disk('public')->exists($report->image_path)) {
@@ -73,9 +81,10 @@ class ReviewDataset
             $seenImages[$hash] = $report->id;
 
             $fileLines = [];
+            $seenLines = [];
             foreach ($report->annotations as $box) {
                 if (! in_array($box->class_name, $allowed, true)) {
-                    $issues[] = "Report {$report->id} uses class '{$box->class_name}', which is not in the live 13-class list.";
+                    $issues[] = "Report {$report->id} uses class '{$box->class_name}', which is not a dataset class.";
                     $fileLines = [];
                     break;
                 }
@@ -85,7 +94,10 @@ class ReviewDataset
                     $fileLines = [];
                     break;
                 }
-                $fileLines[] = $line;
+                if (! isset($seenLines[$line])) {
+                    $seenLines[$line] = true;
+                    $fileLines[] = $line;
+                }
             }
             if ($fileLines === []) {
                 if (! collect($issues)->contains(fn ($msg) => str_contains($msg, "Report {$report->id}"))) {
@@ -121,7 +133,7 @@ class ReviewDataset
     public static function labelmap(): array
     {
         $map = [];
-        foreach (WasteClassMap::CLASSES as $index => $name) {
+        foreach (WasteClassMap::classes() as $index => $name) {
             $map[(string) $index] = $name;
         }
 

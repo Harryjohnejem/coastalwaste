@@ -5,6 +5,8 @@ namespace Tests\Feature;
 use App\Models\Camera;
 use App\Models\Detection;
 use App\Models\DetectionImage;
+use App\Models\DetectionObservation;
+use App\Models\MissedDetectionAnnotation;
 use App\Models\MissedDetectionReport;
 use App\Models\User;
 use App\Models\WasteCategory;
@@ -45,6 +47,18 @@ class DetectionRowActionsTest extends TestCase
             'image_path' => 'detections/det-row.jpg',
             'image_name' => 'det-row.jpg',
             'captured_at' => now(),
+        ]);
+        DetectionObservation::query()->create([
+            'detection_id' => $detection->id,
+            'camera_id' => $camera->id,
+            'track_id' => 7,
+            'raw_label' => 'Ecobag',
+            'confidence' => 0.86,
+            'box_left' => 12,
+            'box_top' => 20,
+            'box_width' => 15,
+            'box_height' => 18,
+            'observed_at' => now(),
         ]);
 
         return $detection;
@@ -92,6 +106,47 @@ class DetectionRowActionsTest extends TestCase
         Storage::disk('public')->assertMissing('detections/det-row.jpg');
     }
 
+    public function test_bulk_delete_removes_only_selected_rows_in_one_request(): void
+    {
+        Storage::fake('public');
+        $detection = $this->detection();
+        $second = Detection::query()->create([
+            'camera_id' => $detection->camera_id,
+            'classification_id' => $detection->classification_id,
+            'confidence' => 82,
+            'quantity' => 1,
+            'location' => 'Paco Beach',
+            'detected_at' => now(),
+            'status' => 'Present',
+        ]);
+        $kept = Detection::query()->create([
+            'camera_id' => $detection->camera_id,
+            'classification_id' => $detection->classification_id,
+            'confidence' => 81,
+            'quantity' => 1,
+            'location' => 'Paco Beach',
+            'detected_at' => now(),
+            'status' => 'Present',
+        ]);
+        $admin = User::factory()->create(['role' => 'Admin']);
+        $staff = User::factory()->create(['role' => 'Staff', 'email' => 'staff-bulk@example.com']);
+
+        $this->actingAs($staff)
+            ->postJson('/api/detections/bulk-delete', ['ids' => [$detection->id]])
+            ->assertForbidden();
+
+        $this->actingAs($admin)
+            ->postJson('/api/detections/bulk-delete', ['ids' => [$detection->id, $second->id, 999999]])
+            ->assertOk()
+            ->assertJsonPath('deleted', 2);
+
+        $this->assertNull(Detection::query()->find($detection->id));
+        $this->assertNull(Detection::query()->find($second->id));
+        $this->assertNotNull(Detection::query()->find($kept->id));
+        $this->assertSame(0, DetectionObservation::query()->where('detection_id', $detection->id)->count());
+        Storage::disk('public')->assertMissing('detections/det-row.jpg');
+    }
+
     public function test_move_to_review_keeps_the_detection_and_does_not_duplicate(): void
     {
         Storage::fake('public');
@@ -121,5 +176,47 @@ class DetectionRowActionsTest extends TestCase
         $this->assertStringContainsString('Ecobag', $report->description);
         Storage::disk('public')->assertExists($report->image_path);
         Storage::disk('public')->assertExists('detections/det-row.jpg');
+        $this->assertSame(1, MissedDetectionAnnotation::query()->where('report_id', $report->id)->count());
+        $box = $report->annotations()->first();
+        $this->assertSame('Ecobag', $box->class_name);
+        $this->assertEqualsWithDelta(0.12, (float) $box->x, 0.0001);
+        $this->assertEqualsWithDelta(0.20, (float) $box->y, 0.0001);
+        $this->assertEqualsWithDelta(0.15, (float) $box->width, 0.0001);
+        $this->assertEqualsWithDelta(0.18, (float) $box->height, 0.0001);
+        $this->assertSame('Ecobag', $report->proposal['label'] ?? null);
+    }
+
+    public function test_reject_keeps_the_review_row(): void
+    {
+        Storage::fake('public');
+        $detection = $this->detection();
+        $admin = User::factory()->create(['role' => 'Admin']);
+
+        $moved = $this->actingAs($admin)
+            ->postJson('/api/detections/'.$detection->id.'/review')
+            ->assertCreated();
+        $reportId = $moved->json('id');
+
+        $this->actingAs($admin)
+            ->postJson('/api/missed-detections/'.$reportId.'/review', [
+                'decision' => 'rejected',
+                'rejection_note' => 'Not waste.',
+            ])
+            ->assertOk()
+            ->assertJsonPath('status', 'rejected');
+
+        $report = MissedDetectionReport::query()->find($reportId);
+        $this->assertNotNull($report);
+        $this->assertSame('rejected', $report->status);
+        $this->assertFalse((bool) $report->include_in_export);
+        $this->assertSame('Not waste.', $report->rejection_note);
+        Storage::disk('public')->assertExists($report->image_path);
+
+        $listed = $this->actingAs($admin)
+            ->getJson('/api/missed-detections?status=rejected')
+            ->assertOk()
+            ->json();
+        $this->assertSame(1, (int) ($listed['counts']['rejected'] ?? 0));
+        $this->assertSame($reportId, $listed['data'][0]['id'] ?? null);
     }
 }

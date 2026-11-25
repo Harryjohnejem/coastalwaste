@@ -1,7 +1,7 @@
 """Precision/recall on labeled stills. Confidence is never treated as accuracy.
 
-Prefers the TapoCam live-waste YOLO val split when present (class names, not
-raw indices — the ONNX model has 14 classes; that dataset yaml lists 13).
+Prefers the TapoCam live-waste YOLO val split when present. Weights (5) and
+the local/Tapo YAMLs share the same 13 class names and order.
 Falls back to _diag/ground_truth.json. mAP50 is a VOC-style curve on that set.
 mAP50-95 is omitted unless Ultralytics val is run on a matching-nc split.
 """
@@ -295,7 +295,7 @@ def main() -> None:
         rows, yaml_names = load_yolo_split(dataset, args.split)
         source = str(dataset)
         print(f"[eval] YOLO split {dataset.name}/{args.split}: {len(rows)} images, {len(yaml_names)} names")
-        print("[eval] matching by class name (ONNX has 14 classes; yaml may list 13).")
+        print("[eval] checkpoint and validation classes are matched by name and index.")
     else:
         rows = load_diag_gt(args.gt)
         print(f"[eval] diagnostic stills only ({len(rows)} images) — not publishable mAP.")
@@ -311,8 +311,8 @@ def main() -> None:
     names = detector_app.resolve_model_classes(model)
     summary = {
         "note": (
-            "TapoCam/local-merged val uses class names. "
-            "mAP50-95 omitted: yaml nc=13 vs ONNX nc=14, so Ultralytics index val would be wrong."
+            "TapoCam/local-merged val uses the weights (5) 13-class order. "
+            "mAP50-95 is omitted by this evaluator; use Ultralytics val for that metric."
         ),
         "source": source,
         "mode": args.mode,

@@ -10,6 +10,7 @@ export const DATASET_ATTRIBUTION = {
   LOCAL_2: 'local_2',
   COMBINED_NOT_ATTRIBUTABLE: 'combined_not_attributable',
   UNKNOWN: 'unknown',
+  LIVE_MODEL: 'live_model',
 };
 
 const LABELS = {
@@ -18,6 +19,7 @@ const LABELS = {
   [DATASET_ATTRIBUTION.COMBINED_NOT_ATTRIBUTABLE]:
     'Combined Model — Source Not Attributable',
   [DATASET_ATTRIBUTION.UNKNOWN]: 'Unknown / Not Attributable',
+  [DATASET_ATTRIBUTION.LIVE_MODEL]: 'Live model',
 };
 
 const TOOLTIPS = {
@@ -36,6 +38,9 @@ export function normalizeDatasetAttribution(value) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, '_');
+  if (raw === DATASET_ATTRIBUTION.LIVE_MODEL) {
+    return DATASET_ATTRIBUTION.LIVE_MODEL;
+  }
   if (
     raw === DATASET_ATTRIBUTION.LOCAL_1 ||
     raw === 'local1' ||
@@ -93,17 +98,40 @@ export function detectionSourceOf(det) {
   return det?.detection_source || det?.camera_id || '—';
 }
 
+/**
+ * Filter value for one row. Live-model rows are grouped by dataset name
+ * ("Weights 10", "local-ruwza-dgl85 v4", ...), the others by attribution code.
+ */
+export function datasetFilterKeyOf(det) {
+  const code = datasetAttributionCodeOf(det);
+  if (code === DATASET_ATTRIBUTION.LIVE_MODEL) {
+    return `${code}:${datasetAttributionOf(det)}`;
+  }
+  return code;
+}
+
 /** Build filter options only from values present in the current record set. */
 export function datasetAttributionFilterOptions(detections = []) {
   const present = new Set();
-  detections.forEach((d) => present.add(datasetAttributionCodeOf(d)));
+  const liveNames = new Map();
+  detections.forEach((d) => {
+    const code = datasetAttributionCodeOf(d);
+    if (code === DATASET_ATTRIBUTION.LIVE_MODEL) {
+      liveNames.set(datasetFilterKeyOf(d), datasetAttributionOf(d));
+    } else {
+      present.add(code);
+    }
+  });
+  const opts = [{ value: 'All Sources', label: 'All Dataset Sources' }];
+  [...liveNames.entries()]
+    .sort((a, b) => a[1].localeCompare(b[1]))
+    .forEach(([value, label]) => opts.push({ value, label }));
   const order = [
     DATASET_ATTRIBUTION.LOCAL_1,
     DATASET_ATTRIBUTION.LOCAL_2,
     DATASET_ATTRIBUTION.COMBINED_NOT_ATTRIBUTABLE,
     DATASET_ATTRIBUTION.UNKNOWN,
   ];
-  const opts = [{ value: 'All Sources', label: 'All Dataset Sources' }];
   order.forEach((code) => {
     if (present.has(code)) {
       opts.push({ value: code, label: LABELS[code] });

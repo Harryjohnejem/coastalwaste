@@ -21,6 +21,8 @@ export function actionErrorMessage(err, fallback = 'The action could not be comp
 export const useNoticeStore = create((set, get) => ({
   toasts: [],
   confirming: null,
+  /** True when the user closed a "Working…" dialog; the result then shows as a toast. */
+  busyHidden: false,
 
   push: ({ type = 'info', title, message, duration }) => {
     const id = ++toastSeq;
@@ -59,6 +61,7 @@ export const useNoticeStore = create((set, get) => ({
 
   showProgress: (options = {}) => {
     set({
+      busyHidden: false,
       confirming: {
         title: options.title || 'Working',
         message: options.message || 'Please wait. This can take a few seconds.',
@@ -71,6 +74,11 @@ export const useNoticeStore = create((set, get) => ({
     });
   },
 
+  hideBusy: () => {
+    if (get().confirming?.mode !== 'busy') return;
+    set({ confirming: null, busyHidden: true });
+  },
+
   finishConfirm: (accepted) => {
     const current = get().confirming;
     if (!current || current.mode === 'busy') return;
@@ -79,12 +87,18 @@ export const useNoticeStore = create((set, get) => ({
   },
 }));
 
-export const notify = {
-  success: () => {},
-  error: () => {},
-  warning: () => {},
-  info: () => {},
+function pushNotice(type, title, message) {
+  useNoticeStore.getState().push({ type, title, message });
+}
+
+export const notice = {
+  success: (title, message) => pushNotice('success', title, message),
+  error: (title, message) => pushNotice('error', title, message),
+  warning: (title, message) => pushNotice('warning', title, message),
+  info: (title, message) => pushNotice('info', title, message),
 };
+
+export const notify = notice;
 
 export function confirmAction(options) {
   return useNoticeStore.getState().ask(options);
@@ -120,11 +134,21 @@ export async function confirmThenRun(options) {
     confirmLabel: options.busyLabel || 'Working…',
   });
 
+  const closeProgress = () => {
+    const s = useNoticeStore.getState();
+    if (s.confirming?.mode === 'busy') useNoticeStore.setState({ confirming: null });
+  };
+
   try {
     const result = await options.work();
     const doneMessage = typeof options.successMessage === 'function'
       ? options.successMessage(result)
       : options.successMessage;
+    if (useNoticeStore.getState().busyHidden) {
+      store.push({ type: 'success', title: options.successTitle || 'Done', message: doneMessage || 'The action completed.' });
+      return { ok: true, cancelled: false, result };
+    }
+    closeProgress();
     await store.ask({
       mode: 'ack',
       title: options.successTitle || 'Done',
@@ -134,6 +158,11 @@ export async function confirmThenRun(options) {
     });
     return { ok: true, cancelled: false, result };
   } catch (error) {
+    if (useNoticeStore.getState().busyHidden) {
+      store.push({ type: 'error', title: options.errorTitle || 'Action failed', message: actionErrorMessage(error, options.errorFallback) });
+      return { ok: false, cancelled: false, error };
+    }
+    closeProgress();
     await store.ask({
       mode: 'ack',
       title: options.errorTitle || 'Action failed',

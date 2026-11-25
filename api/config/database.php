@@ -62,6 +62,9 @@ return [
             'engine' => null,
             'options' => extension_loaded('pdo_mysql') ? array_filter([
                 Mysql::ATTR_SSL_CA => env('MYSQL_ATTR_SSL_CA'),
+                // Fail fast when the database is down instead of holding the
+                // single PHP worker for several seconds per request.
+                PDO::ATTR_TIMEOUT => (int) env('DB_CONNECT_TIMEOUT', 2),
             ]) : [],
         ],
 

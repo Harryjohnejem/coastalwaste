@@ -1,8 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import usePageVisible from '../../hooks/usePageVisible';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 import { useCameraStore } from '../../stores/useCameraStore';
 import { useAuthStore } from '../../stores/useAuthStore';
-import { PARENT_CATEGORIES } from '../../constants';
 import FilterSelect from '../common/FilterSelect';
 import Modal from '../common/Modal';
 import AppNotice from '../common/AppNotice';
@@ -16,10 +16,16 @@ import {
 } from '../../lib/reportForm';
 import { emailReport } from '../../api/reports';
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_RECIPIENTS = 1;
+const MAX_MESSAGE = 2000;
+
 const DEFAULT_EMAIL_MESSAGE = 'Good day. The attached PDF is the Coastal Waste Monitoring and Reporting record for Paco Beach, Barangay Gracia, Tagoloan, Misamis Oriental. This message is sent by the Coastal Waste Monitoring and Reporting System.';
 import {
   DATE_OPTIONS,
   CATEGORY_COLORS,
+  CLASS_COLORS,
+  chartCategories,
   periodBounds,
   previousPeriodBounds,
   inBounds,
@@ -156,14 +162,18 @@ function EmptyChart({ label }) {
   );
 }
 
-function GroupedMonthChart({ data }) {
-  const max = Math.max(...data.flatMap((d) => PARENT_CATEGORIES.map((c) => d.counts[c])), 1);
+function categoryColor(name, index) {
+  return CATEGORY_COLORS[name] || CLASS_COLORS[index % CLASS_COLORS.length];
+}
+
+function GroupedMonthChart({ data, categories }) {
+  const max = Math.max(1, ...data.flatMap((d) => categories.map((c) => d.counts[c] || 0)));
   return (
     <div className="wa-grouped" role="img" aria-label="Monthly detections by category">
       {data.map((d) => (
         <div className="wa-grouped-col" key={`${d.label}-${d.year}`}>
           <div className="wa-grouped-bars">
-            {PARENT_CATEGORIES.map((cat) => (
+            {categories.map((cat, index) => (
               <div
                 key={cat}
                 className="wa-grouped-bar"
@@ -171,9 +181,9 @@ function GroupedMonthChart({ data }) {
                   height: d.counts[cat]
                     ? `${Math.max(6, (d.counts[cat] / max) * 100)}%`
                     : '0%',
-                  background: CATEGORY_COLORS[cat],
+                  background: categoryColor(cat, index),
                 }}
-                title={`${d.label} ${d.year} · ${cat}: ${d.counts[cat]}`}
+                title={`${d.label} ${d.year} · ${cat}: ${d.counts[cat] || 0}`}
               />
             ))}
           </div>
@@ -185,12 +195,27 @@ function GroupedMonthChart({ data }) {
 }
 
 export default function ReportsAnalytics() {
-  const detections = useSettingsStore((s) => s.detections);
+  const detections = useSettingsStore((s) => s.reportDetections);
+  const fetchReportDetections = useSettingsStore((s) => s.fetchReportDetections);
+  const fetchStats = useSettingsStore((s) => s.fetchStats);
   const stats = useSettingsStore((s) => s.stats) || {};
   const statsReady = useSettingsStore((s) => s.statsReady);
-  const detectionsError = useSettingsStore((s) => s.detectionsError);
-  const detectionsLoading = useSettingsStore((s) => s.detectionsLoading);
-  const detectionsLoaded = useSettingsStore((s) => s.detectionsLoaded);
+  const detectionsError = null;
+  const detectionsLoaded = useSettingsStore((s) => s.reportDetectionsLoaded);
+  const detectionsLoading = !detectionsLoaded;
+  const pageVisible = usePageVisible();
+
+  // Real time: every saved record (not only the newest 50), refreshed every 4 s.
+  useEffect(() => {
+    if (!pageVisible) return undefined;
+    fetchReportDetections();
+    fetchStats();
+    const id = setInterval(() => {
+      fetchReportDetections();
+      fetchStats();
+    }, 4000);
+    return () => clearInterval(id);
+  }, [pageVisible, fetchReportDetections, fetchStats]);
   const cameras = useCameraStore((s) => s.cameras);
   const user = useAuthStore((s) => s.user);
 
@@ -330,6 +355,10 @@ export default function ReportsAnalytics() {
         reportNumber,
         reportType: 'Summary',
         generatedBy,
+        // The camera chosen in the filter (All Cameras = every camera).
+        cameras: cameraFilter === 'All Cameras'
+          ? cameraOptions.map((o) => o.value).filter((v) => v !== 'All Cameras')
+          : [cameraFilter],
         monitoringPeriod,
         remarks: notes.observation,
         recommendations: notes.recommendation,
@@ -377,7 +406,15 @@ export default function ReportsAnalytics() {
     if (sendingEmail) return;
     const recipients = parseRecipients(recipientText);
     if (!recipients.length) {
-      setEmailError('Enter at least one recipient email address.');
+      setEmailError('Enter the recipient email address.');
+      return;
+    }
+    if (recipients.length > MAX_RECIPIENTS) {
+      setEmailError('Enter one email address only.');
+      return;
+    }
+    if (!EMAIL_PATTERN.test(recipients[0])) {
+      setEmailError(`Check this address: ${recipients[0]}`);
       return;
     }
     setEmailError('');
@@ -590,12 +627,12 @@ export default function ReportsAnalytics() {
           ) : monthly.every((d) => d.total === 0) ? (
             <EmptyChart label={periodLabel} />
           ) : (
-            <GroupedMonthChart data={monthly} />
+            <GroupedMonthChart data={monthly} categories={chartCategories(monthly)} />
           )}
           <div className="wa-legend">
-            {PARENT_CATEGORIES.map((cat) => (
+            {chartCategories(monthly).map((cat, index) => (
               <span key={cat}>
-                <i style={{ background: CATEGORY_COLORS[cat] }} /> {cat}
+                <i style={{ background: categoryColor(cat, index) }} /> {cat}
               </span>
             ))}
           </div>
@@ -770,31 +807,73 @@ export default function ReportsAnalytics() {
             </button>
           </div>
           <div className="modal-body">
-            <p className="lead">
-              The PDF uses the filters on screen for {periodLabel}. It is sent from the system Gmail account.
-            </p>
+            {/* What is being sent, at a glance. */}
+            <div className="email-summary">
+              <span className="email-summary-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+                  <path d="M14 3v5h5M9 13h6M9 17h4" />
+                </svg>
+              </span>
+              <div>
+                <strong>Coastal waste report (PDF)</strong>
+                <span>
+                  {periodLabel} · {periodDetections.length} record{periodDetections.length === 1 ? '' : 's'} · from the system Gmail account
+                </span>
+              </div>
+            </div>
+
             <div className="field">
-              <label htmlFor="report-message">Message</label>
+              <label htmlFor="report-recipients">To</label>
+              <input
+                id="report-recipients"
+                className="email-to"
+                type="email"
+                inputMode="email"
+                autoComplete="email"
+                value={recipientText}
+                disabled={sendingEmail}
+                placeholder="name@example.com"
+                onChange={(e) => {
+                  setRecipientText(e.target.value);
+                  setEmailError('');
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    sendReportEmail();
+                  }
+                }}
+              />
+              <p className="hint">One email address. The PDF is sent to this person only.</p>
+            </div>
+
+            <div className="field">
+              <div className="email-label-row">
+                <label htmlFor="report-message">Message</label>
+                {emailMessage !== DEFAULT_EMAIL_MESSAGE ? (
+                  <button
+                    type="button"
+                    className="email-reset"
+                    disabled={sendingEmail}
+                    onClick={() => setEmailMessage(DEFAULT_EMAIL_MESSAGE)}
+                  >
+                    Reset to default
+                  </button>
+                ) : null}
+              </div>
               <textarea
                 id="report-message"
                 rows={4}
+                maxLength={MAX_MESSAGE}
                 value={emailMessage}
                 disabled={sendingEmail}
                 onChange={(e) => setEmailMessage(e.target.value)}
               />
-              <p className="hint">This message is filled in for every email. You can change it before sending.</p>
-            </div>
-            <div className="field">
-              <label htmlFor="report-recipients">Recipient email addresses</label>
-              <textarea
-                id="report-recipients"
-                rows={4}
-                value={recipientText}
-                disabled={sendingEmail}
-                placeholder="one@example.com, two@example.com"
-                onChange={(e) => setRecipientText(e.target.value)}
-              />
-              <p className="hint">Separate addresses with commas or new lines.</p>
+              <div className="email-label-row email-under">
+                <p className="hint">Shown above the attached PDF in every email.</p>
+                <span className="email-count">{emailMessage.length}/{MAX_MESSAGE}</span>
+              </div>
             </div>
             {emailError ? <AppNotice type="error" title="Email not sent" message={emailError} /> : null}
           </div>
@@ -802,7 +881,12 @@ export default function ReportsAnalytics() {
             <button className="btn-ghost" type="button" disabled={sendingEmail} onClick={() => setEmailOpen(false)}>
               Cancel
             </button>
-            <button className="btn-save" type="button" disabled={sendingEmail} onClick={sendReportEmail}>
+            <button
+              className="btn-save"
+              type="button"
+              disabled={sendingEmail || !recipientText.trim()}
+              onClick={sendReportEmail}
+            >
               {sendingEmail ? 'Sending…' : 'Send PDF'}
             </button>
           </div>

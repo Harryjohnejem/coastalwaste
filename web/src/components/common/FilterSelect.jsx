@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 
 /**
  * Custom listbox so filter options always show (native <select> menus
@@ -13,10 +13,40 @@ export default function FilterSelect({
   placeholder,
 }) {
   const [open, setOpen] = useState(false);
+  const [dropUp, setDropUp] = useState(false);
   const wrapRef = useRef(null);
+  const menuRef = useRef(null);
   const listId = useId();
   const current = options.find((o) => o.value === value);
   const display = current?.label || placeholder || value || 'Select';
+
+  // Open upward when the menu would run past the bottom of the screen.
+  useLayoutEffect(() => {
+    if (!open) {
+      setDropUp(false);
+      return;
+    }
+    const btn = wrapRef.current?.querySelector('.filter-select-btn');
+    const menu = menuRef.current;
+    if (!btn || !menu) return;
+    const rect = btn.getBoundingClientRect();
+    const needed = menu.offsetHeight + 8;
+    // Respect a scrolling parent (e.g. a modal body) that would clip the menu.
+    let top = 0;
+    let bottom = window.innerHeight;
+    for (let el = wrapRef.current?.parentElement; el && el !== document.body; el = el.parentElement) {
+      const { overflowY } = window.getComputedStyle(el);
+      if (/(auto|scroll|hidden)/.test(overflowY)) {
+        const box = el.getBoundingClientRect();
+        top = Math.max(top, box.top);
+        bottom = Math.min(bottom, box.bottom);
+        break;
+      }
+    }
+    const below = bottom - rect.bottom;
+    const above = rect.top - top;
+    setDropUp(below < needed && above > below);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -60,7 +90,7 @@ export default function FilterSelect({
         className={`filter-select-btn${open ? ' open' : ''}`}
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-labelledby={`${id}-label`}
+        aria-label={`${label ? `${label}: ` : ''}${display}`}
         aria-controls={listId}
         onClick={() => setOpen((v) => !v)}
       >
@@ -70,7 +100,11 @@ export default function FilterSelect({
         </span>
       </button>
       {open && (
-        <ul id={listId} className="filter-select-menu" role="listbox" aria-labelledby={`${id}-label`}>
+        <ul
+          id={listId}
+          ref={menuRef}
+          className={`filter-select-menu${dropUp ? ' drop-up' : ''}`}
+          role="listbox" aria-labelledby={`${id}-label`}>
           {options.length === 0 && (
             <li className="filter-select-empty">No options</li>
           )}

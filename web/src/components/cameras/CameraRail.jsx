@@ -1,14 +1,15 @@
 import { useCameraStore } from '../../stores/useCameraStore';
 import { useNavStore } from '../../stores/useNavStore';
 import CameraCard from './CameraCard';
+import AppNotice from '../common/AppNotice';
 
 export default function CameraRail({ embedded = false }) {
   const cameras = useCameraStore((s) => s.cameras);
   const activeCameraId = useCameraStore((s) => s.activeCameraId);
   const loading = useCameraStore((s) => s.loading);
+  const error = useCameraStore((s) => s.error);
   const setActiveCamera = useCameraStore((s) => s.setActiveCamera);
   const openCameraModal = useCameraStore((s) => s.openCameraModal);
-  const rescanCameras = useCameraStore((s) => s.rescanCameras);
   const setModule = useNavStore((s) => s.setModule);
 
   const online = cameras.filter(
@@ -29,16 +30,21 @@ export default function CameraRail({ embedded = false }) {
         <span className="panel-title">
           Cameras · <b>{online}/{cameras.length} online</b>
         </span>
-        <button className="mini-link" type="button" onClick={() => rescanCameras()}>
-          Rescan
-        </button>
       </div>
+      {error ? (
+        <div style={{ padding: '0 12px 8px' }}>
+          <AppNotice type="error" title="Cameras not loaded" message={error} />
+        </div>
+      ) : null}
       <div className={`cam-list${embedded ? ' cam-list-grid' : ''}`}>
         {loading && cameras.length === 0 && (
           <>
             <div className="skeleton" style={{ height: 120 }} />
             <div className="skeleton" style={{ height: 120 }} />
           </>
+        )}
+        {!loading && cameras.length === 0 && (
+          <p className="log-empty">No cameras in the station database yet. Add a camera to start monitoring Paco Beach.</p>
         )}
         {cameras.map((cam) => (
           <CameraCard

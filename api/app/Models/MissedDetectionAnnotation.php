@@ -7,8 +7,11 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class MissedDetectionAnnotation extends Model
 {
+    protected $table = 'detection_review_annotations';
+
     protected $fillable = [
         'report_id',
+        'status',
         'class_name',
         'class_index',
         'x',
@@ -28,6 +31,17 @@ class MissedDetectionAnnotation extends Model
         ];
     }
 
+    protected static function booted(): void
+    {
+        static::creating(function (self $annotation) {
+            if (! $annotation->status && $annotation->report_id) {
+                $annotation->status = MissedDetectionReport::query()
+                    ->whereKey($annotation->report_id)
+                    ->value('status') ?? MissedDetectionReport::PENDING;
+            }
+        });
+    }
+
     public function report(): BelongsTo
     {
         return $this->belongsTo(MissedDetectionReport::class, 'report_id');
@@ -45,10 +59,11 @@ class MissedDetectionAnnotation extends Model
         if ($w <= 0 || $h <= 0 || $x < 0 || $y < 0 || $x + $w > 1.000001 || $y + $h > 1.000001) {
             return null;
         }
-        if ($this->class_index < 0 || $this->class_index >= count(\App\Support\WasteClassMap::CLASSES)) {
+        $classes = \App\Support\WasteClassMap::classes();
+        if ($this->class_index < 0 || $this->class_index >= count($classes)) {
             return null;
         }
-        if (\App\Support\WasteClassMap::CLASSES[$this->class_index] !== $this->class_name) {
+        if ($classes[$this->class_index] !== $this->class_name) {
             return null;
         }
 

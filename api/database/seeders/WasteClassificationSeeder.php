@@ -11,14 +11,9 @@ class WasteClassificationSeeder extends Seeder
     public function run(): void
     {
         $map = [
-            'Plastic' => ['Plastic Bottle', 'Plastic Bag', 'Ecobag', 'Plastic Cup', 'Bottle Cap', 'Straw', 'Other Plastic'],
-            'Paper' => ['Paper Carton', 'Cardboard', 'Newspaper', 'Tissue / packaging'],
-            'Metal' => ['Tin Can', 'Aluminum', 'Scrap Metal'],
-            'Glass' => ['Glass Bottle', 'Glass Fragment'],
-            'Wood' => ['Wood Debris', 'Driftwood', 'Pallet / lumber'],
-            'Fishing Gear' => ['Fishing Net', 'Fishing Line'],
-            'Styrofoam' => ['Styrofoam'],
-            'Other' => ['Coastal Debris', 'Litter', 'Cigarette', 'Unknown'],
+            'Plastic' => ['Plastic Bottle', 'Plastic Bag', 'Ecobag', 'Plastic Cup', 'Plastic Spoon', 'Bottle Cap', 'Straw'],
+            'Metal' => [],
+            'Glass' => ['Glass Bottle'],
         ];
 
         foreach ($map as $categoryName => $types) {

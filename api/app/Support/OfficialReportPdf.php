@@ -17,7 +17,8 @@ class OfficialReportPdf
 
         $dompdf = new Dompdf($options);
         $dompdf->loadHtml(self::embedSeal($html), 'UTF-8');
-        $dompdf->setPaper('A4', 'portrait');
+        // Long bond paper, 8.5 x 13 in (612 x 936 pt), the size used for printed reports.
+        $dompdf->setPaper([0, 0, 612, 936], 'portrait');
         $dompdf->render();
 
         return $dompdf->output();

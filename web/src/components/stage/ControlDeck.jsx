@@ -3,6 +3,10 @@ import { useCameraStore } from '../../stores/useCameraStore';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 import { captureSnapshot, startClipRecording } from '../../lib/mediaActions';
 import { acknowledgeAction, confirmThenRun } from '../../stores/useNoticeStore';
+import { DEFAULT_RECORDING_SECONDS, recordingLengthLabel } from '../../constants';
+
+// Clip recording button next to Detection on/off.
+const SHOW_RECORD_BUTTON = true;
 
 function pad(n) {
   return String(n).padStart(2, '0');
@@ -19,7 +23,11 @@ function formatUptime(ms) {
 
 export default function ControlDeck() {
   const detectionOn = useCameraStore((s) => s.detectionOn);
-  const setDetectionOn = useCameraStore((s) => s.setDetectionOn);
+  // Clip length from Settings → Recording option.
+  const clipSeconds = useSettingsStore(
+    (s) => Number(s.settings?.recording?.clip_max_seconds) || DEFAULT_RECORDING_SECONDS,
+  );
+  const clipLabel = recordingLengthLabel(clipSeconds);
   const streamStatus = useCameraStore((s) => s.streamStatus);
   const liveSince = useCameraStore((s) => s.liveSince);
   const latencyMs = useCameraStore((s) => s.latencyMs);
@@ -34,7 +42,6 @@ export default function ControlDeck() {
 
   const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState(false);
-  const [togglingDetection, setTogglingDetection] = useState(false);
   const clipRef = useRef(null);
 
   useEffect(() => {
@@ -69,20 +76,19 @@ export default function ControlDeck() {
       : '—';
   const latency = latencyMs != null ? `${latencyMs} ms` : '—';
 
+  // The button flips at once (green = on). The save to Laravel runs in the
+  // background; if it fails, the store restores the previous state.
   const toggleDetect = async () => {
-    if (togglingDetection) return;
     const next = !detectionOn;
-    setTogglingDetection(true);
-    setDetectionOn(next);
     const saved = await useSettingsStore.getState().setDetectionEnabled(next);
-    setTogglingDetection(false);
-    if (saved) return;
-    setDetectionOn(!next);
-    await acknowledgeAction({
-      title: 'Detection not changed',
-      message: 'Could not change detection. Try again.',
-      variant: 'danger',
-    });
+    if (!saved && useCameraStore.getState().detectionOn !== next) {
+      const settingsError = useSettingsStore.getState().settingsError;
+      await acknowledgeAction({
+        title: 'Detection setting not saved',
+        message: settingsError || 'The detection state could not be saved. The previous state was restored.',
+        variant: 'danger',
+      });
+    }
   };
 
   const handleRecord = async () => {
@@ -137,19 +143,19 @@ export default function ControlDeck() {
     setBusy(true);
     const outcome = await confirmThenRun({
       title: 'Start recording?',
-      message: 'Tap Record again to stop. Maximum 2 minutes.',
+      message: `Tap Record again to stop. Recording stops and saves after ${clipLabel}.`,
       confirmLabel: 'Start recording',
       busyTitle: 'Starting recording',
       busyMessage: 'Starting the clip on the live camera.',
       busyLabel: 'Starting…',
       successTitle: 'Recording',
-      successMessage: 'Recording is on. Tap Record again to stop (max 2 min).',
+      successMessage: `Recording is on. Tap Record again to stop (max ${clipLabel}).`,
       errorTitle: 'Recording did not start',
       work: async () => {
         const prefix = String(activeCameraId || 'brgy-gracia')
           .toLowerCase()
           .replace(/[^a-z0-9-]+/g, '-');
-        const session = startClipRecording(prefix, 120000);
+        const session = startClipRecording(prefix, clipSeconds * 1000);
         clipRef.current = session;
         setRecording(true);
         session.done
@@ -239,37 +245,38 @@ export default function ControlDeck() {
           className={`deck-btn${detectionOn ? ' primary' : ''}`}
           type="button"
           onClick={toggleDetect}
-          disabled={togglingDetection}
+          aria-pressed={detectionOn}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <circle cx="12" cy="12" r="3" />
             <path d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2" />
           </svg>
-          {togglingDetection ? 'Saving…' : detectionOn ? 'Detection on' : 'Detection off'}
+          {detectionOn ? 'Detection on' : 'Detection off'}
         </button>
+        {SHOW_RECORD_BUTTON ? (
+          <button
+            className={`deck-btn${recording ? ' recording' : ''}`}
+            type="button"
+            disabled={busy}
+            onClick={handleRecord}
+            aria-pressed={recording}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              {recording ? (
+                <rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" stroke="none" />
+              ) : (
+                <circle cx="12" cy="12" r="6" fill="currentColor" stroke="none" />
+              )}
+              <circle cx="12" cy="12" r="9" />
+            </svg>
+            {recording ? 'Stop' : 'Record'}
+          </button>
+        ) : null}
         <button
-          className={`deck-btn${recording ? ' recording' : ''}`}
+          className="deck-btn"
           type="button"
           disabled={busy}
-          onClick={handleRecord}
-          aria-pressed={recording}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            {recording ? (
-              <rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" stroke="none" />
-            ) : (
-              <circle cx="12" cy="12" r="6" fill="currentColor" stroke="none" />
-            )}
-            <circle cx="12" cy="12" r="9" />
-          </svg>
-          {recording ? 'Stop' : 'Record'}
-        </button>
-        <button
-          className={`deck-btn${recording ? ' recording' : ''}`}
-          type="button"
-          disabled={busy}
-          onClick={handleRecord}
-          aria-pressed={recording}
+          onClick={handleSnapshot}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
@@ -283,7 +290,7 @@ export default function ControlDeck() {
           type="button"
           onClick={handlePrevLens}
           disabled={!canCycle}
-          title="Previous lens"
+          title="Previous camera"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 18l-6-6 6-6" />
@@ -295,7 +302,7 @@ export default function ControlDeck() {
           type="button"
           onClick={handleNextLens}
           disabled={!canCycle}
-          title="Next lens"
+          title="Next camera"
         >
           Next
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

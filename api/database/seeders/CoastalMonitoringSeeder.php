@@ -26,7 +26,7 @@ class CoastalMonitoringSeeder extends Seeder
         $cameras = [
             [
                 'id' => 'CAM-01',
-                'name' => 'CAM-01 · Pier Overlook',
+                'name' => 'CAM-01 · Paco Wide-Angle',
                 'sector' => 'Sector B',
                 'stream_url' => 'http://127.0.0.1:1984/api/stream.mp4?src=cam01',
                 'protocol' => 'MSE',
@@ -37,7 +37,7 @@ class CoastalMonitoringSeeder extends Seeder
             ],
             [
                 'id' => 'CAM-02',
-                'name' => 'CAM-02 · Mangrove Edge',
+                'name' => 'CAM-02 · Paco Wide-Angle',
                 'sector' => 'Sector E',
                 'stream_url' => 'rtsp://192.168.1.65:554',
                 'protocol' => 'RTSP',
@@ -62,7 +62,7 @@ class CoastalMonitoringSeeder extends Seeder
         $today = Carbon::today();
         $detections = [
             [
-                'camera_id' => 'CAM-03',
+                'camera_id' => 'CAM-02',
                 'class_label' => 'Plastic bottle cluster',
                 'confidence' => 0.94,
                 'count' => 4,
@@ -140,7 +140,7 @@ class CoastalMonitoringSeeder extends Seeder
                 'fps' => '25 FPS',
             ],
             'detection' => [
-                'model' => 'YOLOv11n ONNX · best.onnx',
+                'model' => 'YOLOv11x ONNX · best.onnx',
                 'confidence' => 0.6,
                 'interval' => 5,
                 'classes' => [
@@ -154,6 +154,7 @@ class CoastalMonitoringSeeder extends Seeder
                     'Plastic Bottle',
                     'Plastic Cellophane',
                     'Plastic Cup',
+                    'Plastic Spoon',
                     'Plastic Wrapper',
                     'Styro Cup',
                     'Styrofoam',
@@ -178,7 +179,7 @@ class CoastalMonitoringSeeder extends Seeder
                 'reportFrequency' => 'Daily · 06:00',
             ],
             'station' => [
-                'name' => 'Station 01 — North Shoreline',
+                'name' => 'Brgy. Gracia',
                 'lat' => '14.3486',
                 'lon' => '121.3244',
                 'timezone' => 'Asia/Manila (UTC+8)',

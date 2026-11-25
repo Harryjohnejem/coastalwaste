@@ -1,7 +1,30 @@
 import { create } from 'zustand';
 import * as camerasApi from '../api/cameras';
-import { MOCK_CAMERAS } from '../data/mock';
+import { CAMERAS_STORAGE_KEY } from '../constants';
 import { resolvePlayableUrl } from '../lib/streamUrl';
+import { wideCameras } from '../lib/gridCameras';
+import { readDetectionChoice } from '../lib/detectionChoice';
+
+function loadStoredCameras() {
+  try {
+    const raw = localStorage.getItem(CAMERAS_STORAGE_KEY);
+    const list = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(list)) return wideCameras(list);
+  } catch {
+    /* ignore */
+  }
+  return [];
+}
+
+function persistCameras(list) {
+  try {
+    localStorage.setItem(CAMERAS_STORAGE_KEY, JSON.stringify(Array.isArray(list) ? list : []));
+  } catch {
+    /* ignore */
+  }
+}
+
+const storedCameras = loadStoredCameras();
 
 function overlayFrameUnchanged(current, next) {
   if (Boolean(current.overlayKnown) !== Boolean(next.overlayKnown)) return false;
@@ -27,34 +50,89 @@ function overlayFrameUnchanged(current, next) {
   return true;
 }
 
+// Grid or single view, and the camera in single view, survive a page refresh.
+const VIEW_KEY = 'tidalwatch-camera-view';
+
+function readView() {
+  try {
+    const view = JSON.parse(window.localStorage.getItem(VIEW_KEY) || 'null');
+    return view && typeof view === 'object' ? view : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeView(view) {
+  try {
+    window.localStorage.setItem(VIEW_KEY, JSON.stringify(view));
+  } catch {
+    /* private window or blocked storage: the view is just not remembered */
+  }
+}
+
+const savedView = readView();
+const savedCameraId = storedCameras.some((c) => c.id === savedView.camera)
+  ? savedView.camera
+  : storedCameras[0]?.id ?? null;
+
 export const useCameraStore = create((set, get) => ({
-  cameras: MOCK_CAMERAS,
-  activeCameraId: MOCK_CAMERAS[0]?.id ?? null,
+  cameras: storedCameras,
+  activeCameraId: savedCameraId,
   streamStatus: 'STANDBY', // STANDBY | CONNECTING… | LIVE | ERROR
   liveSince: null, // Date.now() when stream became LIVE
   latencyMs: null,
   loading: false,
   error: null,
   cameraModal: { open: false, mode: 'add', cameraId: null },
-  detectionOn: true,
+  // Start from the last On/Off this browser saw; the API value replaces it on load.
+  detectionOn: readDetectionChoice()?.value ?? false,
   overlayNonce: 0,
   overlayBoxes: [],
   overlayKnown: false,
   overlayMeta: null, // { cameraId, frameId, detectToPublishMs, inferenceFps, ... }
+  overlaysByCamera: {},
   inferenceMs: null, // from Python YOLO worker
   liveModel: null,
-  gridView: false,
+  gridView: savedView.grid === true,
   recording: false,
 
   setGridView: (gridView) => set({ gridView }),
   toggleGridView: () => set((s) => ({ gridView: !s.gridView })),
   setRecording: (recording) => set({ recording }),
-  setDetectionOn: (detectionOn) => set({ detectionOn }),
+  setDetectionOn: (detectionOn) => set((s) => (
+    detectionOn
+      ? { detectionOn: true }
+      : {
+          detectionOn: false,
+          overlayBoxes: [],
+          overlayKnown: false,
+          overlayMeta: null,
+          overlaysByCamera: {},
+          inferenceMs: null,
+        }
+  )),
   refreshOverlay: () =>
-    set((s) => ({ detectionOn: true, overlayNonce: s.overlayNonce + 1 })),
+    set((s) => ({ overlayNonce: s.overlayNonce + 1 })),
   setOverlayBoxes: (overlayBoxes) => set({ overlayBoxes }),
   setOverlayKnown: (overlayKnown) => set({ overlayKnown }),
   setOverlayMeta: (overlayMeta) => set({ overlayMeta }),
+  setCameraOverlay: (cameraId, payload) => set((s) => {
+    const id = String(cameraId || '');
+    if (!id) return s;
+    return {
+      overlaysByCamera: {
+        ...s.overlaysByCamera,
+        [id]: payload,
+      },
+    };
+  }),
+  clearCameraOverlay: (cameraId) => set((s) => {
+    const id = String(cameraId || '');
+    if (!id || !s.overlaysByCamera[id]) return s;
+    const overlaysByCamera = { ...s.overlaysByCamera };
+    delete overlaysByCamera[id];
+    return { overlaysByCamera };
+  }),
   setInferenceMs: (inferenceMs) => set({ inferenceMs }),
   setLiveModel: (liveModel) => set({ liveModel }),
   applyOverlay: (next) => set((s) => {
@@ -85,16 +163,12 @@ export const useCameraStore = create((set, get) => ({
     });
   },
 
-  /** Cycle to previous / next camera (wide-angle ↔ second lens). */
+  /** Move to the previous or next camera. Each camera is its own view. */
   cycleCamera: (direction = 1) => {
     const { cameras, activeCameraId, setActiveCamera, setGridView } = get();
     if (!cameras.length) return null;
-    const idx = Math.max(
-      0,
-      cameras.findIndex((c) => c.id === activeCameraId),
-    );
-    const next =
-      cameras[(idx + direction + cameras.length) % cameras.length] ?? null;
+    const idx = Math.max(0, cameras.findIndex((camera) => camera.id === activeCameraId));
+    const next = cameras[(idx + direction + cameras.length) % cameras.length];
     if (!next) return null;
     setGridView(false);
     setActiveCamera(next.id);
@@ -168,9 +242,12 @@ export const useCameraStore = create((set, get) => ({
     set({ error: null });
     try {
       const cameras = await camerasApi.listCameras();
-      const list = Array.isArray(cameras) ? cameras : cameras?.data ?? [];
-      const activeCameraId = get().activeCameraId;
+      const list = wideCameras(Array.isArray(cameras) ? cameras : cameras?.data ?? []);
+      const current = get().activeCameraId;
+      const remembered = readView().camera;
+      const activeCameraId = list.some((c) => c.id === current) ? current : remembered;
       const stillActive = list.some((c) => c.id === activeCameraId);
+      persistCameras(list);
       set({
         cameras: list,
         activeCameraId: stillActive ? activeCameraId : list[0]?.id ?? null,
@@ -178,35 +255,43 @@ export const useCameraStore = create((set, get) => ({
       });
     } catch (err) {
       set({ loading: false, error: err.message || 'Could not load cameras.' });
-      // Keep mock cameras so the UI remains usable while the API is missing.
     }
   },
 
   createCamera: async (payload) => {
     const created = await camerasApi.createCamera(payload);
-    // TODO: attempt to connect the new stream and flip the tag to LIVE
-    set((s) => ({ cameras: [...s.cameras, created] }));
+    await get().fetchCameras();
+    if (created?.id && !get().cameras.some((camera) => camera.id === created.id) && wideCameras([created]).length) {
+      set((s) => ({ cameras: [...s.cameras, created] }));
+    }
     return created;
   },
 
   updateCamera: async (id, payload) => {
-    // TODO: persist cfg to your backend
     const updated = await camerasApi.updateCamera(id, payload);
-    set((s) => ({
-      cameras: s.cameras.map((c) => (c.id === id ? { ...c, ...updated } : c)),
-    }));
+    await get().fetchCameras();
+    if (updated?.id && wideCameras([updated]).length) {
+      set((s) => ({
+        cameras: s.cameras.some((camera) => camera.id === id)
+          ? s.cameras.map((camera) => (camera.id === id ? { ...camera, ...updated } : camera))
+          : [...s.cameras, updated],
+      }));
+    }
     return updated;
   },
 
   removeCamera: async (id) => {
-    // TODO: notify your backend
     await camerasApi.deleteCamera(id);
-    set((s) => {
-      const cameras = s.cameras.filter((c) => c.id !== id);
-      const activeCameraId =
-        s.activeCameraId === id ? cameras[0]?.id ?? null : s.activeCameraId;
-      return { cameras, activeCameraId };
-    });
+    const cameras = get().cameras.filter((camera) => camera.id !== id);
+    const activeCameraId =
+      get().activeCameraId === id ? cameras[0]?.id ?? null : get().activeCameraId;
+    persistCameras(cameras);
+    set({ cameras, activeCameraId });
+    try {
+      await get().fetchCameras();
+    } catch {
+      /* Keep the local list so a failed refresh cannot restore the deleted camera. */
+    }
   },
 
   testCamera: async (id, url) => {
@@ -221,3 +306,8 @@ export const useCameraStore = create((set, get) => ({
     }
   },
 }));
+
+useCameraStore.subscribe((state, prev) => {
+  if (state.gridView === prev.gridView && state.activeCameraId === prev.activeCameraId) return;
+  writeView({ grid: Boolean(state.gridView), camera: state.activeCameraId ?? null });
+});

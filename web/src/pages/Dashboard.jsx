@@ -11,16 +11,15 @@ import WasteComposition from '../components/log/WasteComposition';
 import WasteDetectionsModule from '../components/detections/WasteDetectionsModule';
 import ReportsAnalytics from '../components/reports/ReportsAnalytics';
 import SettingsModal from '../components/settings/SettingsModal';
+import CleanupAlert from '../components/common/CleanupAlert';
 import { useCameraStore } from '../stores/useCameraStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { useAuthStore } from '../stores/useAuthStore';
 import { useNavStore } from '../stores/useNavStore';
 import { CHART_POLL_MS, POLL_INTERVAL_MS, RECORDS_POLL_MS } from '../constants';
-import { useAutoLogin } from '../hooks/useAutoLogin';
 import usePageVisible from '../hooks/usePageVisible';
 
 export default function Dashboard() {
-  useAutoLogin();
   const pageVisible = usePageVisible();
   const module = useNavStore((s) => s.module);
   const fetchCameras = useCameraStore((s) => s.fetchCameras);
@@ -48,19 +47,16 @@ export default function Dashboard() {
     let cancelled = false;
     (async () => {
       if (!bootstrapped.current) {
-        await Promise.all([
-          fetchDetections(50),
-          fetchCameras(),
-          fetchSettings(),
-          fetchComposition('all'),
-          fetchStats(),
-          fetchTrends(),
-          fetchWasteCatalog(),
-        ]);
+        const jobs = [fetchCameras(), fetchSettings(), fetchWasteCatalog()];
+        if (module === 'live') {
+          jobs.push(fetchDetections(50), fetchStats(), fetchComposition('all'));
+        } else if (module === 'reports') {
+          jobs.push(fetchStats(), fetchComposition('30d'), fetchTrends());
+        }
+        await Promise.all(jobs);
         bootstrapped.current = true;
       }
       if (cancelled) return;
-      if (module === 'reports') fetchDetections(200);
     })();
 
     return () => {
@@ -88,18 +84,15 @@ export default function Dashboard() {
     const liveId = setInterval(() => {
       if (module !== 'live' || liveRunning) return;
       liveRunning = true;
-      Promise.all([fetchDetections(50), fetchStats()]).finally(() => {
+      fetchStats().finally(() => {
         liveRunning = false;
       });
     }, POLL_INTERVAL_MS);
 
     const recordsId = setInterval(() => {
-      if (recordsRunning || module === 'cameras' || module === 'live') return;
+      if (recordsRunning || module === 'cameras' || module === 'live' || module === 'detections') return;
       recordsRunning = true;
       const jobs = [fetchStats()];
-      if (module === 'detections' || module === 'reports') {
-        jobs.push(fetchDetections(module === 'reports' ? 200 : 50));
-      }
       Promise.all(jobs).finally(() => {
         recordsRunning = false;
       });
@@ -185,7 +178,7 @@ export default function Dashboard() {
               <header className="module-head">
                 <div>
                   <h2 className="module-title">Cameras</h2>
-                  <p className="module-sub">Manage IP cameras and live feeds for Brgy. Gracia.</p>
+                  <p className="module-sub">Add, edit, or remove Paco Beach cameras. Changes save to the station database and stay after refresh.</p>
                 </div>
               </header>
               <CameraRail embedded />
@@ -198,6 +191,7 @@ export default function Dashboard() {
           </main>
         )}
       </div>
+      <CleanupAlert />
       <SettingsModal onTestStream={connectStream} />
       <CameraModal onConnectStream={connectStream} />
     </>

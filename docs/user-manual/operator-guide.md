@@ -45,7 +45,8 @@ If the viewport says it is waiting for a signal: start `gateway` and confirm `go
 
 ## Notifications and settings
 
-- The top bar bell lists quota and system alerts. Mark them read when acknowledged.
+- The top bar bell lists cleanup threshold alerts (Waste building up, Cleanup needed, Cleaned), new detections, and system alerts. Mark them read when acknowledged.
+- When a camera reaches the warning level or the cleanup limit, a banner appears at the top of Live Monitoring and the Main Dashboard. Set the limit and warning level in Settings → Notifications.
 - Settings (gear) hold the detection confidence threshold and related options. Those values are stored in `system_settings`, not in a separate threshold table.
 
 ## If something looks empty
@@ -56,3 +57,9 @@ If the viewport says it is waiting for a signal: start `gateway` and confirm `go
 | Video but no boxes | `detector` + matching `DETECTOR_KEY` |
 | Login loop | `api` running + correct `VITE_API_URL` |
 | No detections in the table | Detector posting `detections` array, or add one manually |
+
+## Waste status and verifying cleaning
+
+- **Waste Detected / Still Present**: the waste is on camera.
+- **No Longer Visible**: the camera no longer sees it. This does not mean it was cleaned.
+- **Cleaning Verified**: after the waste is physically collected on site, open **Waste Detections**, click **Verify cleaning** on the record (or select several and use **Verify cleaning** at the top). Your name and the time are saved. Only the Barangay Sanitary Inspector or an administrator can do this.

@@ -14,6 +14,12 @@ class DetectionDatasetAttributionTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        \App\Models\SystemSetting::saveDefault(['detection' => ['enabled' => true]]);
+    }
+
     private function seedCameraAndClass(): Camera
     {
         WasteClassification::query()->create([
@@ -31,14 +37,15 @@ class DetectionDatasetAttributionTest extends TestCase
         ]);
     }
 
-    public function test_live_ingest_sets_combined_not_attributable(): void
+    public function test_live_ingest_saves_the_live_dataset_name(): void
     {
         $this->seedCameraAndClass();
+        \App\Support\LiveModel::save('Weights 10', 'YOLOv11l');
 
         $response = $this->withHeader('X-Detector-Key', 'tidalwatch-detector-local')
             ->postJson('/api/detections/live', [
                 'camera_id' => 'CAM-01',
-                'model' => 'YOLOv11n ONNX · best.onnx',
+                'model' => 'YOLO11l ONNX · best.onnx',
                 'detections' => [[
                     'class' => 'Plastic Bottle',
                     'confidence' => 0.86,
@@ -51,24 +58,24 @@ class DetectionDatasetAttributionTest extends TestCase
         $response->assertOk();
         $detection = Detection::query()->first();
         $this->assertNotNull($detection);
-        $this->assertSame(
-            DatasetAttribution::TRAINING_COMBINED,
-            $detection->training_dataset,
-        );
-        $this->assertSame(
-            DatasetAttribution::COMBINED_NOT_ATTRIBUTABLE,
-            $detection->dataset_attribution,
-        );
+        $this->assertSame('Weights 10', $detection->training_dataset);
+        $this->assertSame('YOLOv11l', $detection->training_model);
+        $this->assertSame(DatasetAttribution::LIVE_MODEL, $detection->dataset_attribution);
 
         $payload = $detection->toApiArray();
         $this->assertSame('CAM-01', $payload['detection_source']);
-        $this->assertSame(
-            'Combined Model — Source Not Attributable',
-            $payload['dataset_attribution_label'],
-        );
-        // Must not invent Local 1 / Local 2 from the prediction.
-        $this->assertNotSame('Local 1', $payload['dataset_attribution_label']);
-        $this->assertNotSame('Local 2', $payload['dataset_attribution_label']);
+        $this->assertSame('YOLOv11l / Roboflow', $payload['dataset_attribution_label']);
+        $this->assertSame('Weights 10', $payload['training_dataset_label']);
+
+        // A later deploy changes the name for new detections only.
+        \App\Support\LiveModel::save('local-ruwza-dgl85 v4', 'YOLOv11l');
+        $this->assertSame('Weights 10', $detection->fresh()->toApiArray()['training_dataset_label']);
+    }
+
+    public function test_live_model_names_from_a_roboflow_job(): void
+    {
+        $this->assertSame('local-ruwza-dgl85 v4', \App\Support\LiveModel::datasetFromHostedModel('local-ruwza-dgl85/4', 4));
+        $this->assertSame('YOLOv11l', \App\Support\LiveModel::modelName('yolov11', 'large'));
     }
 
     public function test_legacy_null_attribution_exposes_unknown_without_backfill(): void

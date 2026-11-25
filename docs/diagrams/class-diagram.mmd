@@ -75,18 +75,14 @@ classDiagram
         +recordLog()
     }
 
-    class WasteQuota {
-        +id
-        +name
-        +camera_id
-        +category_id
-        +quota_limit
-        +period
-        +cleanup_recommendation
-        +is_active
-        +currentCount()
-        +checkQuota()
-        +triggerAlert()
+    class CleanupThreshold {
+        +limit
+        +warn_percent
+        +enabled
+        +status()
+        +liveCounts()
+        +check()
+        +notify()
     }
 
     class Notification {
@@ -128,7 +124,6 @@ classDiagram
     Detection "1" --> "0..*" DetectionLog : has
     User "1" --> "0..*" Report : generates
     User "1" --> "0..*" Notification : receives
-    Camera "0..1" --> "0..*" WasteQuota : scopes
-    WasteCategory "0..1" --> "0..*" WasteQuota : scopes
-    WasteQuota --> Notification : alerts when reached
-    SystemSetting --> WasteQuota : stores related config
+    CleanupThreshold --> Camera : counts waste per camera
+    CleanupThreshold --> Notification : alerts on Building up / Full / Cleaned
+    SystemSetting --> CleanupThreshold : stores limit, warning level, last levels

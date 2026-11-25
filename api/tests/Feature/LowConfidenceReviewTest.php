@@ -7,6 +7,7 @@ use App\Models\Detection;
 use App\Models\MissedDetectionReport;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
 use Tests\TestCase;
 
 class LowConfidenceReviewTest extends TestCase
@@ -19,7 +20,7 @@ class LowConfidenceReviewTest extends TestCase
         \Illuminate\Support\Facades\Storage::fake('public');
     }
 
-    public function test_low_confidence_known_class_is_queued_without_a_live_detection(): void
+    public function test_low_confidence_known_class_is_not_added_to_detection_reviews(): void
     {
         User::factory()->create(['role' => 'Admin', 'email' => 'admin-review@example.com']);
         Camera::query()->create([
@@ -32,59 +33,20 @@ class LowConfidenceReviewTest extends TestCase
         $created = $this->withHeader('X-Detector-Key', 'tidalwatch-detector-local')
             ->post('/api/missed-detections/unfamiliar', [
                 'camera_id' => 'CAM-01',
-                'label' => 'Plastic Bottle',
+                'label' => 'Can',
                 'reason' => 'low_confidence',
-                'confidence' => 0.62,
-                'x' => 0.10,
-                'y' => 0.20,
-                'width' => 0.30,
-                'height' => 0.25,
-                'image' => missed_jpeg(),
-            ]);
-
-        $created->assertCreated();
-        $created->assertJsonPath('status', MissedDetectionReport::PENDING);
-        $created->assertJsonPath('prediction', 'Plastic Bottle');
-        $created->assertJsonPath('prediction_confidence', 0.62);
-        $created->assertJsonPath('model_boxes.0.source', 'model');
-        $created->assertJsonPath('model_boxes.0.class_name', 'Plastic Bottle');
-        $created->assertJsonPath('annotations', []);
-        $this->assertSame(0, Detection::query()->count());
-        $this->assertSame(1, MissedDetectionReport::query()->count());
-
-        $again = $this->withHeader('X-Detector-Key', 'tidalwatch-detector-local')
-            ->post('/api/missed-detections/unfamiliar', [
-                'camera_id' => 'CAM-01',
-                'label' => 'Plastic Bottle',
-                'reason' => 'low_confidence',
-                'confidence' => 0.64,
-                'x' => 0.12,
-                'y' => 0.21,
-                'width' => 0.30,
-                'height' => 0.25,
-                'image' => missed_jpeg(),
-            ]);
-        $again->assertOk();
-        $again->assertJsonPath('id', $created->json('id'));
-        $this->assertSame(1, MissedDetectionReport::query()->count());
-
-        $this->withHeader('X-Detector-Key', 'tidalwatch-detector-local')
-            ->post('/api/missed-detections/unfamiliar', [
-                'camera_id' => 'CAM-01',
-                'label' => 'shoe',
-                'reason' => 'low_confidence',
-                'confidence' => 0.55,
+                'confidence' => 0.68,
                 'x' => 0.40,
-                'y' => 0.40,
-                'width' => 0.20,
-                'height' => 0.20,
-                'image' => missed_jpeg(),
-            ])->assertStatus(422);
+                'y' => 0.50,
+                'width' => 0.06,
+                'height' => 0.09,
+                'image' => new UploadedFile(dirname(__DIR__).'/fixtures/pixel.jpg', 'frame.jpg', 'image/jpeg', null, true),
+            ]);
 
-        $list = $this->actingAs(User::query()->first())
-            ->getJson('/api/missed-detections?status=pending');
-        $list->assertOk();
-        $this->assertSame($created->json('id'), $list->json('data.0.id'));
+        $created->assertOk();
+        $created->assertJsonPath('queued', false);
+        $this->assertSame(0, Detection::query()->count());
+        $this->assertSame(0, MissedDetectionReport::query()->count());
     }
 
     public function test_review_confidence_is_saved_for_the_detector(): void

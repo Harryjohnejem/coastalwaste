@@ -10,6 +10,7 @@ that count so one missed YOLO frame is not treated as cleaning.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import time
 from typing import Any
 
 import cv2
@@ -245,20 +246,96 @@ class SceneMotion:
         return box_motion_fraction(mask, box)
 
 
+def _center(box: dict[str, Any] | None) -> tuple[float, float] | None:
+    if not box:
+        return None
+    return (
+        float(box.get("left") or 0) + float(box.get("width") or 0) / 2.0,
+        float(box.get("top") or 0) + float(box.get("height") or 0) / 2.0,
+    )
+
+
+def _iou_percent(a: dict[str, Any] | None, b: dict[str, Any] | None) -> float:
+    if not a or not b:
+        return 0.0
+    ax1, ay1 = float(a.get("left") or 0), float(a.get("top") or 0)
+    ax2, ay2 = ax1 + float(a.get("width") or 0), ay1 + float(a.get("height") or 0)
+    bx1, by1 = float(b.get("left") or 0), float(b.get("top") or 0)
+    bx2, by2 = bx1 + float(b.get("width") or 0), by1 + float(b.get("height") or 0)
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter <= 0:
+        return 0.0
+    union = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1) + max(0.0, bx2 - bx1) * max(0.0, by2 - by1) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def still_in_frame(
+    last_box: dict[str, Any] | None,
+    class_name: str | None,
+    scene_boxes: list[dict[str, Any]] | None,
+) -> bool:
+    """True when YOLO still sees this same object in the current frame.
+
+    A nearby different class, or a leftover overlay ghost, must not keep the
+    original record Present after the waste was picked up.
+    """
+    if not last_box or not scene_boxes:
+        return False
+    label = str(class_name or "")
+    last_center = _center(last_box)
+    for box in scene_boxes:
+        same = label and str(box.get("class") or "") == label
+        if not same:
+            continue
+        iou = _iou_percent(last_box, box)
+        if iou >= 0.22:
+            return True
+        other = _center(box)
+        if last_center and other:
+            dist = ((last_center[0] - other[0]) ** 2 + (last_center[1] - other[1]) ** 2) ** 0.5
+            if dist <= 8.0 and iou >= 0.08:
+                return True
+    return False
+
+
 class PresenceBook:
     """Per saved detection, not per global track id."""
 
-    def __init__(self, absence_frames: int = 8, motion_hold: float = 0.12) -> None:
+    def __init__(
+        self,
+        absence_frames: int = 24,
+        motion_hold: float = 0.12,
+        absence_seconds: float | None = None,
+        min_absent_frames: int = 2,
+    ) -> None:
         self.absence_frames = max(1, int(absence_frames))
         self.motion_hold = float(motion_hold)
+        # Time-based clean-up: a slow model (seconds per frame) still clears
+        # the log in near real time. None keeps the frame-count rule.
+        self.absence_seconds = None if absence_seconds is None else max(0.0, float(absence_seconds))
+        self.min_absent_frames = max(1, int(min_absent_frames))
         self.watch: dict[int, dict[str, Any]] = {}
+
+    def _gone_long_enough(self, row: dict[str, Any], now: float) -> bool:
+        absent = int(row.get("absent") or 0)
+        if self.absence_seconds is None:
+            return absent >= self.absence_frames
+        if absent < self.min_absent_frames:
+            return False
+        since = row.get("absent_since")
+        return since is not None and now - float(since) >= self.absence_seconds
 
     def step(
         self,
         active: dict[int, dict[str, Any]],
         motion_mask: np.ndarray | None,
         stream_ok: bool,
+        scene_boxes: list[dict[str, Any]] | None = None,
+        now: float | None = None,
     ) -> list[dict[str, Any]]:
+        now = time.time() if now is None else float(now)
         seen: set[int] = set()
         updates: list[dict[str, Any]] = []
         for info in active.values():
@@ -278,6 +355,7 @@ class PresenceBook:
                     "class": info.get("class"),
                 })
             row["absent"] = 0
+            row["absent_since"] = None
             row["sent"] = False
             row["last_box"] = info.get("box")
             row["class"] = info.get("class")
@@ -288,15 +366,23 @@ class PresenceBook:
         for detection_id, row in self.watch.items():
             if detection_id in seen or row.get("sent"):
                 continue
-            if box_motion_fraction(motion_mask, row.get("last_box")) >= self.motion_hold:
+            if still_in_frame(row.get("last_box"), row.get("class"), scene_boxes):
+                row["absent"] = 0
+                row["absent_since"] = None
                 continue
+            # Motion in the last box is often a person picking the waste up.
+            # Do not pause absence on that motion.
             row["absent"] = int(row.get("absent") or 0) + 1
-            if row["absent"] < self.absence_frames:
+            if row.get("absent_since") is None:
+                row["absent_since"] = now
+            if not self._gone_long_enough(row, now):
                 continue
             row["sent"] = True
             updates.append({
                 "detection_id": detection_id,
-                "status": "Confirmed Cleaned",
+                # Left the camera view: inferred, NOT cleaning. Only a person
+                # can mark "Cleaning Verified" in the dashboard.
+                "status": "No Longer Visible",
                 "reason": "inferred_disappearance",
                 "class": row.get("class"),
             })

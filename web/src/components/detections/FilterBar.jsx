@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import FilterSelect from '../common/FilterSelect';
-import AddWasteModal from './AddWasteModal';
 import { listsFromCatalog, locationOf } from '../../lib/wasteFilters';
+import { useClassesStore } from '../../stores/useClassesStore';
 import { datasetAttributionFilterOptions } from '../../lib/datasetSource';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 
@@ -23,8 +23,8 @@ export default function FilterBar({
   detections = [],
 }) {
   const catalog = useSettingsStore((s) => s.wasteCatalog);
+  useClassesStore((s) => s.version); // new classes or categories: rebuild the lists
   const { categories, subtypes } = listsFromCatalog(catalog);
-  const [addKind, setAddKind] = useState(null);
   const [searchInput, setSearchInput] = useState(filters.search || '');
 
   useEffect(() => {
@@ -76,7 +76,6 @@ export default function FilterBar({
   const categoryOpts = [
     { value: 'All Categories', label: 'All Categories' },
     ...categories.map((o) => ({ value: o, label: o })),
-    { value: '__add_category__', label: '+ Add waste category', kind: 'action', group: 'Manage' },
   ];
 
   const classificationOpts = [{ value: 'All Classifications', label: 'All Classifications' }];
@@ -93,23 +92,12 @@ export default function FilterBar({
       });
     });
   }
-  classificationOpts.push({
-    value: '__add_classification__',
-    label: '+ Add waste classification',
-    kind: 'action',
-    group: 'Manage',
-  });
-
   const locationOpts = [
     { value: 'All Locations', label: 'All Locations' },
     ...[...locationSet].sort().map((o) => ({ value: o, label: o })),
   ];
 
   const datasetSourceOpts = datasetAttributionFilterOptions(detections);
-
-  const selectedCatalogCategory = categoryFilter
-    ? catalog.find((c) => c.name === categoryFilter)
-    : null;
 
   return (
     <div className="filter-bar">
@@ -151,13 +139,7 @@ export default function FilterBar({
           filters.wasteType === 'All Types' ? 'All Categories' : filters.wasteType
         }
         options={categoryOpts}
-        onChange={(v) => {
-          if (v === '__add_category__') {
-            setAddKind('category');
-            return;
-          }
-          set('wasteType', v);
-        }}
+        onChange={(v) => set('wasteType', v)}
       />
 
       <FilterSelect
@@ -165,13 +147,7 @@ export default function FilterBar({
         label="Waste Classification"
         value={filters.wasteSubtype || 'All Classifications'}
         options={classificationOpts}
-        onChange={(v) => {
-          if (v === '__add_classification__') {
-            setAddKind('classification');
-            return;
-          }
-          set('wasteSubtype', v);
-        }}
+        onChange={(v) => set('wasteSubtype', v)}
       />
 
       <FilterSelect
@@ -215,12 +191,6 @@ export default function FilterBar({
         />
       </div>
 
-      <AddWasteModal
-        open={Boolean(addKind)}
-        kind={addKind || 'category'}
-        defaultCategoryId={selectedCatalogCategory?.id}
-        onClose={() => setAddKind(null)}
-      />
     </div>
   );
 }

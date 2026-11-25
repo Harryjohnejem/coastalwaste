@@ -17,6 +17,8 @@ class StatsController extends Controller
 {
     public function today(): JsonResponse
     {
+        // Keep Active / Confirmed Clean in step with what the cameras still see.
+        \App\Support\WastePresence::sweepStale();
         $payload = Cache::remember(DashboardCache::statsKey(), DashboardCache::TTL_SECONDS, function () {
             $todayStart = Carbon::today();
             $tomorrow = $todayStart->copy()->addDay();
@@ -34,10 +36,12 @@ class StatsController extends Controller
                     SUM(CASE WHEN status != 'Ignored' AND detected_at >= ? THEN 1 ELSE 0 END) as month_count,
                     SUM(CASE WHEN status != 'Ignored' THEN 1 ELSE 0 END) as total_count,
                     SUM(CASE WHEN status = 'Present' THEN 1 ELSE 0 END) as present_count,
-                    SUM(CASE WHEN status = 'Confirmed Cleaned' THEN 1 ELSE 0 END) as cleaned_count,
-                    SUM(CASE WHEN status = 'Confirmed Cleaned' AND removed_at >= ? AND removed_at < ? THEN 1 ELSE 0 END) as cleaned_today,
-                    MAX(CASE WHEN status = 'Confirmed Cleaned' THEN removed_at END) as last_removed
-                ", [$today, $tomorrowAt, $yesterdayAt, $today, $monthAt, $today, $tomorrowAt])
+                    SUM(CASE WHEN status = 'No Longer Visible' THEN 1 ELSE 0 END) as not_visible_count,
+                    SUM(CASE WHEN status = 'No Longer Visible' AND removed_at >= ? AND removed_at < ? THEN 1 ELSE 0 END) as not_visible_today,
+                    SUM(CASE WHEN status = 'Cleaning Verified' THEN 1 ELSE 0 END) as verified_count,
+                    SUM(CASE WHEN status = 'Cleaning Verified' AND cleaning_verified_at >= ? AND cleaning_verified_at < ? THEN 1 ELSE 0 END) as verified_today,
+                    MAX(CASE WHEN status IN ('No Longer Visible', 'Cleaning Verified') THEN removed_at END) as last_removed
+                ", [$today, $tomorrowAt, $yesterdayAt, $today, $monthAt, $today, $tomorrowAt, $today, $tomorrowAt])
                 ->first();
 
             $todayCount = (int) ($row->today_count ?? 0);
@@ -63,8 +67,12 @@ class StatsController extends Controller
                 'month_detections' => (int) ($row->month_count ?? 0),
                 'total_detections' => (int) ($row->total_count ?? 0),
                 'present' => (int) ($row->present_count ?? 0),
-                'confirmed_cleaned' => (int) ($row->cleaned_count ?? 0),
-                'confirmed_cleaned_today' => (int) ($row->cleaned_today ?? 0),
+                // Inferred: left the camera view. NOT cleaning.
+                'no_longer_visible' => (int) ($row->not_visible_count ?? 0),
+                'no_longer_visible_today' => (int) ($row->not_visible_today ?? 0),
+                // Checked by the Barangay Sanitary Inspector / an administrator.
+                'cleaning_verified' => (int) ($row->verified_count ?? 0),
+                'cleaning_verified_today' => (int) ($row->verified_today ?? 0),
                 'last_removed_at' => $row->last_removed
                     ? Carbon::parse($row->last_removed)->format('Y-m-d H:i:s')
                     : null,
@@ -119,7 +127,7 @@ class StatsController extends Controller
                 ->select('waste_classifications.waste_type', DB::raw('COUNT(*) as aggregate'))
                 ->pluck('aggregate', 'waste_type');
 
-            $classCounts = array_fill_keys(DatasetClasses::NAMES, 0);
+            $classCounts = array_fill_keys(\App\Support\ClassRegistry::all(), 0);
             foreach ($rows as $label => $count) {
                 $matched = DatasetClasses::match((string) $label);
                 if ($matched === null) {
@@ -131,7 +139,7 @@ class StatsController extends Controller
             $categoryCounts = array_fill_keys(DatasetClasses::CATEGORIES, 0);
             foreach ($classCounts as $name => $count) {
                 $category = DatasetClasses::categoryOf($name);
-                if ($category !== null) {
+                if ($category !== null && array_key_exists($category, $categoryCounts)) {
                     $categoryCounts[$category] += $count;
                 }
             }
@@ -229,53 +237,6 @@ class StatsController extends Controller
         });
 
         return response()->json($payload);
-    }
-
-    public function trends(): JsonResponse
-    {
-        $today = Carbon::today()->endOfDay();
-
-        $daily = [];
-        for ($i = 6; $i >= 0; $i--) {
-            $day = Carbon::today()->subDays($i);
-            $daily[] = [
-                'label' => $day->format('D'),
-                'value' => $this->countBetween($day->copy()->startOfDay(), $day->copy()->endOfDay()),
-            ];
-        }
-
-        $weekly = [];
-        for ($i = 3; $i >= 0; $i--) {
-            $start = Carbon::today()->startOfWeek(Carbon::MONDAY)->subWeeks($i);
-            $end = $start->copy()->endOfWeek(Carbon::SUNDAY);
-            if ($end->gt($today)) {
-                $end = $today->copy();
-            }
-            $weekly[] = [
-                'label' => 'W'.(4 - $i),
-                'value' => $this->countBetween($start, $end),
-            ];
-        }
-
-        $monthly = [];
-        for ($i = 5; $i >= 0; $i--) {
-            $month = Carbon::today()->startOfMonth()->subMonths($i);
-            $start = $month->copy()->startOfMonth();
-            $end = $month->copy()->endOfMonth();
-            if ($end->gt($today)) {
-                $end = $today->copy();
-            }
-            $monthly[] = [
-                'label' => $month->format('M'),
-                'value' => $this->countBetween($start, $end),
-            ];
-        }
-
-        return response()->json([
-            'daily' => $daily,
-            'weekly' => $weekly,
-            'monthly' => $monthly,
-        ]);
     }
 
     private function countBetween(Carbon $from, Carbon $to): int

@@ -4,7 +4,7 @@ Computer Vision-Based Coastal Waste Monitoring and Reporting System (web + on-LA
 
 ## Context
 
-Barangay operators watch Paco Beach cameras, review YOLO waste detections, manage quotas, and file cleanup reports. There is no mobile or desktop client — only the Vite dashboard.
+Barangay operators watch Paco Beach cameras, review YOLO waste detections, watch the cleanup threshold, and file cleanup reports. There is no mobile or desktop client — only the Vite dashboard.
 
 ## Services and ports
 
@@ -38,7 +38,7 @@ Barangay operators watch Paco Beach cameras, review YOLO waste detections, manag
 | Service | Folder | Why it exists |
 |---------|--------|----------------|
 | Gateway | `gateway/` | Browsers cannot play Tapo RTSP. go2rtc publishes `cam01`. |
-| API | `api/` | Auth, persistence, stats, quotas, detector ingest. |
+| API | `api/` | Auth, persistence, stats, cleanup threshold, detector ingest. |
 | Detector | `detector/` | Open-vocab YOLO on JPEG frames; posts boxes + log hits. |
 | Web | `web/` | Operator UI (four modules). |
 

@@ -1,8 +1,10 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
+import TodayReportPage from './pages/TodayReportPage';
 import RequireAuth from './components/common/RequireAuth';
 import NoticeHost from './components/common/NoticeHost';
+import PageSwitchOverlay from './components/common/PageSwitchOverlay';
 import './stores/useThemeStore';
 
 export default function App() {
@@ -13,9 +15,11 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route element={<RequireAuth />}>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/today" element={<TodayReportPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        <PageSwitchOverlay />
       </BrowserRouter>
       <NoticeHost />
     </>

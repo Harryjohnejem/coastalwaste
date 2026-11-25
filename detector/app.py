@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -24,9 +25,10 @@ os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 import cv2
 import httpx
 import numpy as np
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from ultralytics import YOLO
 
@@ -55,9 +57,11 @@ class Settings(BaseSettings):
     camera_id: str = "CAM-01"
     sector: str = "Sector B"
     api_base: str = "http://127.0.0.1:8000/api"
+    # Used when api_base (the detector's own Laravel server, :8001) is down.
+    api_fallback_base: str = "http://127.0.0.1:8000/api"
     detector_key: str = "tidalwatch-detector-local"
     interval_s: float = 0.5
-    # How often each camera looks for objects outside the 13 CCTV classes.
+    # How often each camera looks for objects outside the 14 CCTV classes.
     unfamiliar_interval_s: float = 20.0
     # full_plus_tiles (alias: two_strip) = full frame + 2x2. tiles_2x2 / full_frame are faster.
     detection_mode: str = "two_strip"
@@ -72,11 +76,15 @@ class Settings(BaseSettings):
     class_identity_remap: bool = False
     min_confirmation_frames: int = 3
     detection_cooldown_seconds: float = 10.0
-    # Keep a recorded track briefly after it drops out, so a new ID is not saved again.
-    track_lost_timeout_seconds: float = 3.0
+    # Keep a recorded track after it drops out, so a new ID is not saved again.
+    track_lost_timeout_seconds: float = 12.0
     log_cooldown_s: float = 10.0
     # Processed frames a saved object must stay missing before an inferred removal.
-    absence_frames: int = 8
+    absence_frames: int = 10
+    # Mark "No Longer Visible" once waste has been missing this long (and for at
+    # least ABSENCE_MIN_FRAMES processed frames). 0 = use ABSENCE_FRAMES only.
+    absence_seconds: float = 4.0
+    absence_min_frames: int = 2
     # OpenCV MOG2 motion detection (complements YOLO; never gates inference).
     motion_min_area: int = 800
     motion_history: int = 120
@@ -115,9 +123,15 @@ class Settings(BaseSettings):
     roboflow_model_ids: str = ""
     roboflow_primary: str = "yolov7-trash-05-04-2023-by3ff/1"
     roboflow_workflow_id: str = "local-datasets-vlocal-datasets-fgmmm-2-yolo11n-t1-logic"
+    # Comma-separated class names the live detector never draws, records, or
+    # sends to Detection Reviews (e.g. "Cardboard,Paper Drink Carton,Paper Bag").
+    excluded_classes: str = ""
 
 
-# YOLOv11n best.onnx class order from weights (4).pt (CCTV dataset).
+# Official class names. The live order comes from best.onnx itself
+# (weights (5).pt has 13 classes: no Plastic Spoon).
+# Fallback order from weights (11).pt.
+# Plastic Bag is not in this model. Do not insert it or later labels shift.
 ONNX_CLASSES = [
     "Can",
     "Cardboard",
@@ -129,6 +143,7 @@ ONNX_CLASSES = [
     "Plastic Bottle",
     "Plastic Cellophane",
     "Plastic Cup",
+    "Plastic Spoon",
     "Plastic Wrapper",
     "Styro Cup",
     "Styrofoam",
@@ -145,6 +160,7 @@ SEVERITY = {
     "plastic bottle": "alert",
     "plastic bag": "alert",
     "plastic cup": "alert",
+    "plastic spoon": "alert",
     "plastic wrapper": "alert",
     "plastic cellophane": "alert",
     "plastic straw": "alert",
@@ -185,6 +201,7 @@ LABEL = {
     "plastic bottle": "Plastic Bottle",
     "plastic bag": "Plastic Bag",
     "plastic cup": "Plastic Cup",
+    "plastic spoon": "Plastic Spoon",
     "plastic wrapper": "Plastic Wrapper",
     "plastic cellophane": "Plastic Cellophane",
     "plastic straw": "Plastic Straw",
@@ -258,7 +275,7 @@ _CLASS_ALIASES = {
 
 
 def canonical_waste_class(raw: str) -> str | None:
-    """Map a model/raw label onto the 13 CCTV class names."""
+    """Map a model/raw label onto the 14 CCTV class names."""
     key = _norm_class(raw)
     if not key:
         return None
@@ -275,6 +292,21 @@ def canonical_waste_class(raw: str) -> str | None:
     return None
 
 
+def register_model_classes(classes: list[str]) -> list[str]:
+    """Add class names this model has that the detector did not know yet."""
+    added: list[str] = []
+    for name in classes:
+        clean = str(name or "").strip()
+        if not clean or canonical_waste_class(clean):
+            continue
+        ONNX_CLASSES.append(clean)
+        _CLASS_BY_NORM[_norm_class(clean)] = clean
+        added.append(clean)
+    if added:
+        print(f"[detector] new classes from the model: {added}")
+    return added
+
+
 def resolve_model_classes(model) -> list[str]:
     """Prefer ONNX model.names, rewritten to official dataset labels."""
     names = getattr(model, "names", None) or {}
@@ -282,14 +314,14 @@ def resolve_model_classes(model) -> list[str]:
         ordered = [str(names[i]) for i in range(len(names))]
     else:
         ordered = [str(item) for item in list(names)]
+    mapped = [canonical_waste_class(item) or item for item in ordered]
     if len(ordered) != len(ONNX_CLASSES):
         print(
             f"[detector] WARNING: ONNX class count {len(ordered)} != "
-            f"{len(ONNX_CLASSES)} official names. Falling back to ONNX_CLASSES. "
+            f"{len(ONNX_CLASSES)} official names. Using the model's own order. "
             f"raw={ordered}"
         )
-        return list(ONNX_CLASSES)
-    mapped = [canonical_waste_class(item) or item for item in ordered]
+        return mapped
     mismatched = [
         (index, raw, official)
         for index, (raw, official) in enumerate(zip(mapped, ONNX_CLASSES))
@@ -300,6 +332,21 @@ def resolve_model_classes(model) -> list[str]:
     return mapped
 
 
+def onnx_model_family(path: Path) -> str:
+    """Model size from the ONNX metadata, e.g. "YOLO11l". Falls back to "YOLO11"."""
+    try:
+        import onnxruntime as ort
+
+        meta = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"]).get_modelmeta()
+        text = str(meta.custom_metadata_map.get("description") or "")
+        match = re.search(r"YOLO\s*v?(\d+)([nsmlx])", text, re.IGNORECASE)
+        if match:
+            return f"YOLO{match.group(1)}{match.group(2).lower()}"
+    except Exception:  # noqa: BLE001
+        pass
+    return "YOLO11"
+
+
 def onnx_runtime_providers() -> list[str]:
     """Providers actually installed. CUDA is used only if this list includes it."""
     try:
@@ -308,6 +355,34 @@ def onnx_runtime_providers() -> list[str]:
         return list(ort.get_available_providers())
     except Exception:  # noqa: BLE001
         return []
+
+
+def excluded_class_set() -> set[str]:
+    """Official names of the classes switched off by EXCLUDED_CLASSES."""
+    out: set[str] = set()
+    for item in str(settings.excluded_classes or "").split(","):
+        name = item.strip()
+        if name:
+            out.add(canonical_waste_class(name) or name)
+    return out
+
+
+def is_excluded_class(label: str | None) -> bool:
+    if not label:
+        return False
+    return (canonical_waste_class(label) or label) in excluded_class_set()
+
+
+def allowed_class_ids(class_names: list[str]) -> list[int] | None:
+    """Model class ids to run NMS on, or None when nothing is excluded."""
+    excluded = excluded_class_set()
+    if not excluded:
+        return None
+    return [
+        index
+        for index, name in enumerate(class_names)
+        if (canonical_waste_class(name) or name) not in excluded
+    ]
 
 
 def dataset_class_set() -> set[str]:
@@ -333,9 +408,15 @@ _state: dict[str, Any] = {
 # camera_id → StreamPublishState (filled by per-stream workers)
 _stream_states: dict[str, StreamPublishState] = {}
 _stream_configs: list[StreamConfig] = []
+# CAM-01/CAM-02 from DETECTOR_STREAMS. Dashboard cameras never replace these.
+_env_stream_ids: set[str] = set()
+MANAGED_CAMERAS_POLL_S = 15.0
 _rtsp_cap: cv2.VideoCapture | None = None
 TRAINED_WEIGHTS = Path(__file__).with_name("weights") / "trained" / "best.pt"
 ONNX_WEIGHTS = Path(__file__).with_name("weights") / "trained" / "best.onnx"
+# The live station uses the wide lenses only. Zoom streams are not paired.
+_LENS_WIDE_OF: dict[str, str] = {}
+_model_box: dict[str, Any] = {"model": None, "label": ""}
 LOCAL_YAML = Path(__file__).with_name("datasets") / "local-merged" / "data.yaml"
 
 
@@ -350,6 +431,22 @@ _MAX_BOX_PCT = {
     "paper bag": (45.0, 50.0),
 }
 _DEFAULT_MAX_BOX_PCT = (40.0, 45.0)
+# Telephoto and zoomed frames make a real item fill much of the picture.
+_CLOSEUP_CLASSES = {
+    "Can",
+    "Cardboard",
+    "Ecobag",
+    "Glass Bottle",
+    "Paper Bag",
+    "Paper Drink Carton",
+    "Plastic Bottle",
+    "Plastic Cellophane",
+    "Plastic Cup",
+    "Plastic Spoon",
+    "Plastic Wrapper",
+    "Styro Cup",
+    "Styrofoam",
+}
 
 
 def filter_overlay_boxes(boxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -364,9 +461,16 @@ def filter_overlay_boxes(boxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if is_person_sized(b):
             continue
-        if w > max_w or h > max_h:
+        # Zoomed-in waste fills the frame. Size limits stay for labels that
+        # are often a person; known close-up classes are kept.
+        label = canonical_waste_class(str(b.get("class") or ""))
+        if label not in _CLOSEUP_CLASSES and (w > max_w or h > max_h):
             continue
-        if (w / 100.0) * (h / 100.0) > 0.18 and raw not in _MAX_BOX_PCT:
+        if (
+            label not in _CLOSEUP_CLASSES
+            and (w / 100.0) * (h / 100.0) > 0.18
+            and raw not in _MAX_BOX_PCT
+        ):
             continue
         kept.append(b)
     return kept
@@ -376,7 +480,7 @@ def load_dataset_catalog() -> tuple[list[dict[str, Any]], list[str]]:
     """Only the 14-class local-merged dataset."""
     row = {
         "name": "local-merged",
-        "model_id": "local-datasets/1",
+        "model_id": "local-1/1",
         "workspace": "dioquino-jims-carl-k",
         "group": "local-merged",
         "trained": True,
@@ -434,6 +538,63 @@ def detection_mode(raw: str | None = None) -> str:
     return "full_plus_tiles"
 
 
+def live_model():
+    """The ONNX model the cameras are using. Deploy can replace it without a restart."""
+    return _model_box.get("model")
+
+
+def set_live_model(model, label: str) -> None:
+    _model_box["model"] = model
+    _model_box["label"] = label
+    _state["model_label"] = label
+
+
+def wait_for_paired_wide(camera_id: str) -> None:
+    """Hold the zoom lens until the wide lens of the same camera has just published.
+
+    The two lenses are one Tapo camera. Running the zoom immediately after the
+    wide keeps both views on the same moment.
+    """
+    wide_id = _LENS_WIDE_OF.get(str(camera_id or "").upper())
+    if not wide_id:
+        return
+    started = time.time()
+    deadline = started + 3.0
+    while time.time() < deadline and not _stop.is_set():
+        wide = _stream_states.get(wide_id)
+        published = getattr(wide, "overlay_published_at", None) if wide else None
+        if published and float(published) >= started - 0.05:
+            return
+        _stop.wait(0.05)
+
+
+def stream_detection_mode(go2rtc_src: str) -> str:
+    """Both wide cameras use the full frame and closer crops. Telephoto stays one frame.
+
+    Paco's bottles disappear when the whole 2304px frame is squeezed into 640,
+    and a 2x2 grid can cut the same object in half. The wide pass keeps the
+    full frame, the quadrants, and the left and right halves. stream6
+    telephoto stays a single frame so one close object is not split.
+    """
+    src = str(go2rtc_src or "").strip().lower()
+    # cam04 is the unused telephoto. cam01 and cam02 are the two wide lenses.
+    if src == "cam04":
+        return "full_frame"
+    return "full_plus_tiles"
+
+
+def _vertical_strips(width: int, height: int) -> list[tuple[int, int, int, int]]:
+    """Left and right halves. A 2x2 grid cuts objects that sit on the middle line."""
+    if width < 960:
+        return []
+    mid = width // 2
+    overlap = int(width * 0.08)
+    return [
+        (0, 0, min(width, mid + overlap), height),
+        (max(0, mid - overlap), 0, width, height),
+    ]
+
+
 def inference_regions(
     width: int,
     height: int,
@@ -444,10 +605,11 @@ def inference_regions(
     if resolved == "full_frame" or width < 960:
         return [(0, 0, width, height)]
     tiles = _frame_tiles(width, height)
+    strips = _vertical_strips(width, height)
     if resolved == "tiles_2x2":
-        return tiles
+        return [*tiles, *strips]
     if len(tiles) > 1:
-        return [(0, 0, width, height), *tiles]
+        return [(0, 0, width, height), *tiles, *strips]
     return tiles
 
 
@@ -683,6 +845,92 @@ def _iou(a: dict[str, Any], b: dict[str, Any]) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def _box_center(box: dict[str, Any]) -> tuple[float, float] | None:
+    width = float(box.get("width") or 0)
+    height = float(box.get("height") or 0)
+    if width <= 0 or height <= 0:
+        return None
+    return (
+        float(box.get("left") or 0) + width / 2.0,
+        float(box.get("top") or 0) + height / 2.0,
+    )
+
+
+_CLASS_FAMILY = {
+    "Plastic Wrapper": "film",
+    "Plastic Cellophane": "film",
+    "Ecobag": "film",
+    "Paper Bag": "film",
+    "Plastic Bottle": "bottle",
+    "Glass Bottle": "bottle",
+    "Paper Drink Carton": "bottle",
+    "Plastic Cup": "cup",
+    "Styro Cup": "cup",
+    "Styrofoam": "foam",
+    "Cardboard": "sheet",
+}
+
+
+def _class_family(label: str | None) -> str:
+    name = canonical_waste_class(str(label or "")) or str(label or "")
+    return _CLASS_FAMILY.get(name, name.lower())
+
+
+def same_physical_object(
+    a: dict[str, Any] | None,
+    b: dict[str, Any] | None,
+    class_a: str | None = None,
+    class_b: str | None = None,
+) -> bool:
+    """True when two boxes are the same piece of waste, even if the ID changed."""
+    if not a or not b:
+        return False
+    iou = _iou(a, b)
+    if iou >= 0.28:
+        return True
+    family_a = _class_family(class_a or a.get("class"))
+    family_b = _class_family(class_b or b.get("class"))
+    related = bool(family_a) and family_a == family_b
+    if related and iou >= 0.14:
+        return True
+    center_a = _box_center(a)
+    center_b = _box_center(b)
+    if not center_a or not center_b:
+        return False
+    dist = ((center_a[0] - center_b[0]) ** 2 + (center_a[1] - center_b[1]) ** 2) ** 0.5
+    if related and dist <= 12.0 and iou >= 0.06:
+        return True
+    if dist <= 8.0 and iou >= 0.10:
+        return True
+    return False
+
+
+def recorded_track_for(
+    tracks: dict[int, dict[str, Any]],
+    box: dict[str, Any],
+    track_id: int | None,
+    pending_ids: set[int] | None = None,
+) -> dict[str, Any] | None:
+    """Return an already-saved track that covers this box."""
+    pending = pending_ids or set()
+    for old_id, state in tracks.items():
+        if old_id == track_id:
+            continue
+        if not (
+            state.get("recorded")
+            or state.get("saved_id")
+            or state.get("snapshot_saved")
+            or old_id in pending
+        ):
+            continue
+        last = state.get("last_box")
+        if not isinstance(last, dict):
+            continue
+        if same_physical_object(box, last, box.get("class"), state.get("class")):
+            return state
+    return None
+
+
 # Plastic Wrapper / Cellophane often fire on bottles, cans, and bags.
 _GENERIC_FILM = {"Plastic Wrapper", "Plastic Cellophane"}
 _TALL_WASTE = {
@@ -695,30 +943,15 @@ _TALL_WASTE = {
 }
 _BAG_WASTE = {"Plastic Bag", "Ecobag", "Paper Bag"}
 _CLASS_MIN_CONF = {
-    "Plastic Wrapper": 0.86,
-    "Plastic Cellophane": 0.88,
-    "Styro Cup": 0.75,
-    "Face Mask": 0.88,
+    "Plastic Wrapper": 0.80,
+    "Plastic Cellophane": 0.80,
+    "Styro Cup": 0.80,
+    "Face Mask": 0.80,
+    "Ecobag": 0.84,
+    "Paper Drink Carton": 0.84,
+    "Styrofoam": 0.84,
+    "Cardboard": 0.82,
 }
-# Higher wins when two labels land on the same object.
-_CLASS_PRIORITY = {
-    "Plastic Bottle": 3,
-    "Glass Bottle": 3,
-    "Can": 3,
-    "Plastic Cup": 3,
-    "Styro Cup": 3,
-    "Paper Drink Carton": 3,
-    "Plastic Bag": 3,
-    "Ecobag": 3,
-    "Paper Bag": 3,
-    "Face Mask": 3,
-    "Plastic Wrapper": 2,
-    "Plastic Cellophane": 2,
-    "Cardboard": 1,
-    "Styrofoam": 1,
-}
-
-
 def _box_aspect(box: dict[str, Any]) -> tuple[float, float, float]:
     width = max(float(box.get("width") or 0), 0.01)
     height = max(float(box.get("height") or 0), 0.01)
@@ -742,20 +975,10 @@ def is_person_sized(box: dict[str, Any]) -> bool:
     aspect = height / max(width, 0.01)
     area = (width / 100.0) * (height / 100.0)
     label = canonical_waste_class(str(box.get("class") or ""))
-    closeup = label in {
-        "Can",
-        "Cardboard",
-        "Ecobag",
-        "Glass Bottle",
-        "Paper Bag",
-        "Paper Drink Carton",
-        "Plastic Bottle",
-        "Plastic Cup",
-        "Styro Cup",
-        "Styrofoam",
-    }
-    if closeup:
-        return height >= 55 and width >= 22 and aspect >= 1.15
+    if label in _CLOSEUP_CLASSES:
+        # A zoomed bottle or bag can fill half the frame. Only a standing
+        # person shape is rejected.
+        return height >= 72 and width >= 20 and aspect >= 1.6
     if height >= 28 and aspect >= 1.35:
         return True
     if height >= 22 and width >= 14 and aspect >= 1.2:
@@ -778,8 +1001,9 @@ def refine_waste_class(box: dict[str, Any]) -> str | None:
     aspect, width, height = _box_aspect(box)
     area = (width / 100.0) * (height / 100.0)
 
-    # Person / clothing often fires as film covering a large share of the frame.
-    if area > 0.10 and label in _GENERIC_FILM:
+    # A person or piece of clothing can fill the frame as film.
+    # A zoomed wrapper is large too, so only a tall blob is dropped.
+    if area > 0.35 and aspect >= 1.3 and label in _GENERIC_FILM:
         return None
 
     # Weak wrapper scores are the usual bottle/can mix-up. Keep only strong film.
@@ -792,8 +1016,17 @@ def refine_waste_class(box: dict[str, Any]) -> str | None:
     if label in _BAG_WASTE and aspect >= 2.6 and width <= 10.0:
         return None
 
+    # The live box uses the model's class. Shape guesses stay behind the flag.
     if not _identity_remap_enabled():
         return label
+
+    # Snack packs are often called Ecobag. A real eco bag fills more of the frame.
+    if label == "Ecobag" and area < 0.035 and width < 16.0 and height < 22.0:
+        return "Plastic Wrapper"
+
+    # A round bottle is not a juice carton.
+    if label == "Paper Drink Carton" and aspect >= 2.45 and width <= 7.5:
+        return "Plastic Bottle"
 
     if label in {"Styro Cup", "Plastic Cup"} and aspect < 0.85:
         if label == "Styro Cup" and area >= 0.012:
@@ -819,10 +1052,10 @@ def apply_class_refinement(
     boxes: list[dict[str, Any]],
     review_out: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Rewrite/drop misclassified boxes, then prefer specific classes over film.
+    """Drop unreliable boxes. Overlaps keep the higher-confidence class.
 
-    Dropped known classes are not sent to missed-detection review. That queue
-    is only for objects outside the 13 dataset classes.
+    A known class that is too weak to save is returned in review_out so it can
+    be checked in Detection Reviews.
     """
     refined: list[dict[str, Any]] = []
     for box in boxes:
@@ -834,9 +1067,28 @@ def apply_class_refinement(
                 "person_sized",
             )
             continue
+        if is_excluded_class(str(box.get("class") or "")):
+            continue
         label = refine_waste_class(box)
+        if label and is_excluded_class(label):
+            continue
         if not label:
             score = float(box.get("confidence") or 0)
+            official = canonical_waste_class(str(box.get("class") or ""))
+            if official and DRAW_FLOOR <= score < MIN_DETECT_CONF:
+                box["class"] = official
+                box["raw_class"] = official.lower()
+                box["provisional"] = True
+                if review_out is not None and score >= REVIEW_POSSIBLE_FLOOR:
+                    review_out.append(dict(box))
+                log_rejected(
+                    str(box.get("camera_id") or "-"),
+                    official,
+                    score,
+                    "below_80",
+                )
+                refined.append(box)
+                continue
             log_rejected(
                 str(box.get("camera_id") or "-"),
                 str(box.get("class") or "unknown"),
@@ -851,26 +1103,17 @@ def apply_class_refinement(
     ranked = sorted(refined, key=lambda item: item["confidence"], reverse=True)
     kept: list[dict[str, Any]] = []
     for box in ranked:
-        skip = False
-        replace_at: int | None = None
-        box_rank = _CLASS_PRIORITY.get(box["class"], 2)
-        for index, prev in enumerate(kept):
-            if _iou(box, prev) < 0.35:
+        box_conf = float(box.get("confidence") or 0)
+        overlapped = False
+        for prev in kept:
+            if _iou(box, prev) < 0.35 and not _same_object(box, prev, 0.35):
                 continue
-            prev_rank = _CLASS_PRIORITY.get(prev["class"], 2)
-            if box_rank < prev_rank:
-                skip = True
-                break
-            if box_rank > prev_rank:
-                replace_at = index
-                break
-            skip = True
+            # The stronger score is the class written on the box.
+            if box_conf > float(prev.get("confidence") or 0) + 0.05:
+                kept[kept.index(prev)] = box
+            overlapped = True
             break
-        if skip:
-            continue
-        if replace_at is not None:
-            kept[replace_at] = box
-        else:
+        if not overlapped:
             kept.append(box)
     return _dedupe_boxes(kept)
 
@@ -894,6 +1137,7 @@ def predict_frame_boxes(
     regions = inference_regions(frame_w, frame_h, mode)
     boxes: list[dict[str, Any]] = []
     crop_ms: list[float] = []
+    keep_ids = allowed_class_ids(class_names)
     t_predict = time.perf_counter()
     for x0, y0, x1, y1 in regions:
         crop = frame[y0:y1, x0:x1]
@@ -903,8 +1147,9 @@ def predict_frame_boxes(
             conf=conf_min,
             iou=iou,
             imgsz=int(settings.imgsz) if int(settings.imgsz) > 0 else 640,
-            agnostic_nms=False,
+            agnostic_nms=True,
             max_det=50,
+            classes=keep_ids,
             verbose=False,
         )
         crop_ms.append((time.perf_counter() - t_crop) * 1000)
@@ -921,13 +1166,14 @@ def predict_frame_boxes(
             gx1, gy1 = x0 + lx1, y0 + ly1
             gw, gh = lx2 - lx1, ly2 - ly1
             label = canonical_waste_class(class_names[cls_id])
-            if not label:
+            if not label or is_excluded_class(label):
                 continue
             raw = label.lower()
             boxes.append(
                 {
                     "id": f"yolo-{cls_id}-{int(gx1)}-{int(gy1)}",
                     "class": label,
+                    "cls_id": cls_id,
                     "raw_class": raw,
                     "confidence": round(score, 4),
                     "severity": SEVERITY.get(raw, "alert"),
@@ -1010,7 +1256,13 @@ def track_frame_boxes(
         cy = float(box["top"]) / 100.0 * frame_h + bh / 2.0
         xywh.append([cx, cy, max(bw, 1.0), max(bh, 1.0)])
         confs.append(box["confidence"])
-        clss.append(class_names.index(box["class"]) if box["class"] in class_names else 0)
+        stored = box.get("cls_id")
+        if box["class"] in class_names:
+            clss.append(class_names.index(box["class"]))
+        elif isinstance(stored, int) and 0 <= stored < len(class_names):
+            clss.append(stored)
+        else:
+            clss.append(0)
     batch = _DetBatch(xywh, confs, clss) if boxes else _DetBatch(np.zeros((0, 4)), [], [])
     byte_tracker = tracker if tracker is not None else new_byte_tracker()
     tracked = byte_tracker.update(batch, img=frame)
@@ -1116,6 +1368,38 @@ def _match_track_id_from_stracks(
     return _match_track_id_by_iou(box, np.vstack(rows), frame_w, frame_h)
 
 
+_API_BASE_CHOICE = {"base": "", "checked": 0.0}
+_API_BASE_LOCK = Lock()
+
+
+def api_base() -> str:
+    """
+    Laravel address for detector posts. Prefer API_BASE (the detector's own
+    server); if it does not answer, use API_FALLBACK_BASE so detections,
+    presence and Today's Report keep updating. Re-checked every 20 seconds.
+    """
+    primary = settings.api_base.rstrip("/")
+    fallback = (settings.api_fallback_base or "").rstrip("/")
+    if not fallback or fallback == primary:
+        return primary
+    now = time.time()
+    with _API_BASE_LOCK:
+        if _API_BASE_CHOICE["base"] and now - _API_BASE_CHOICE["checked"] < 20:
+            return _API_BASE_CHOICE["base"]
+        _API_BASE_CHOICE["checked"] = now
+    chosen = primary
+    try:
+        # Any HTTP answer (even 401) means the server is up.
+        httpx.get(f"{primary}/settings/detection", timeout=1.0)
+    except Exception:
+        chosen = fallback
+    with _API_BASE_LOCK:
+        if chosen != _API_BASE_CHOICE["base"]:
+            print(f"[detector] Laravel API: {chosen}" + (" (fallback; API_BASE is not answering)" if chosen == fallback else ""))
+        _API_BASE_CHOICE["base"] = chosen
+    return chosen
+
+
 def load_stream_configs() -> list[StreamConfig]:
     return parse_detector_streams(
         streams_json=settings.detector_streams,
@@ -1173,8 +1457,12 @@ def _get_stream_publish(camera_id: str | None) -> tuple[str, StreamPublishState 
     return wanted, None
 
 
+# Waste Detections saves only sure detections; lower scores go to Detection Reviews only.
+WASTE_DETECTION_MIN_CONF = 0.80
+
+
 def crop_confirmed_jpeg(frame, box, pad_ratio: float = 0.15) -> str | None:
-    """Crop one confirmed box from this frame. The crop is not taken from a later frame."""
+    """Zoomed snapshot for Waste Detections: one confirmed box from this frame."""
     if frame is None or not box:
         return None
     frame_h, frame_w = frame.shape[:2]
@@ -1193,7 +1481,45 @@ def crop_confirmed_jpeg(frame, box, pad_ratio: float = 0.15) -> str | None:
     if x2 <= x1 or y2 <= y1:
         return None
     crop = frame[y1:y2, x1:x2]
-    ok, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+    crop_h, crop_w = crop.shape[:2]
+    longest = max(crop_h, crop_w)
+    if longest > 480:
+        scale = 480 / float(longest)
+        crop = cv2.resize(
+            crop,
+            (max(1, int(crop_w * scale)), max(1, int(crop_h * scale))),
+        )
+    ok, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+    if not ok:
+        return None
+    return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+SNAPSHOT_MAX_SIDE = 1920
+SNAPSHOT_JPEG_QUALITY = 85
+
+
+def full_frame_jpeg(frame) -> str | None:
+    """Detection Reviews snapshot: the whole livestream frame, no crop or zoom.
+
+    Training images then look like what the cameras see, and the saved box
+    (percent of the full frame) lines up with the image in Detection Reviews.
+    """
+    if frame is None:
+        return None
+    frame_h, frame_w = frame.shape[:2]
+    if frame_w < 1 or frame_h < 1:
+        return None
+    image = frame
+    longest = max(frame_h, frame_w)
+    if longest > SNAPSHOT_MAX_SIDE:
+        scale = SNAPSHOT_MAX_SIDE / float(longest)
+        image = cv2.resize(
+            frame,
+            (max(1, int(frame_w * scale)), max(1, int(frame_h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    ok, buf = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), SNAPSHOT_JPEG_QUALITY])
     if not ok:
         return None
     return base64.b64encode(buf.tobytes()).decode("ascii")
@@ -1240,10 +1566,11 @@ def update_tracks(
     record_conf: float,
     lost_timeout_s: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Mark boxes confirmed only after this same track id is seen on enough frames.
+    """Confirm a box when it is solid enough to save, without waiting for three 80% looks.
 
-    recorded is stored on the track id. A different track id is a different
-    tracking event, even when the class and location match a recent save.
+    A broad class is ready on one score at or above record_conf. A specific
+    class is ready once it repeats at STEADY_RECORD_CONF. The stored score is
+    the highest look so far. recorded is stored on the track id.
     """
     seen: set[int] = set()
     timeout = max(
@@ -1274,7 +1601,11 @@ def update_tracks(
         votes = state.get("class_votes") if state else None
         if not isinstance(votes, deque):
             votes = deque(maxlen=5)
-        votes.append(str(box["class"]))
+        model_class = str(box["class"])
+        votes.append(model_class)
+        # Best score per class: a label is only ever shown with its own score.
+        class_best = dict(state.get("class_best") or {}) if state else {}
+        class_best[model_class] = max(float(class_best.get(model_class) or 0), score)
         if state is None:
             state = {
                 "class": box["class"],
@@ -1285,56 +1616,56 @@ def update_tracks(
                 "best_conf": score,
                 "class_votes": votes,
             }
-        elif state["class"] != box["class"]:
-            # Keep a stable class unless the new label is stronger or more specific.
-            prev_conf = float(state.get("best_conf") or 0)
-            prev_rank = _CLASS_PRIORITY.get(str(state["class"]), 2)
-            new_rank = _CLASS_PRIORITY.get(str(box["class"]), 2)
-            majority = max(set(votes), key=list(votes).count) if votes else box["class"]
-            majority_n = list(votes).count(majority)
-            genuine = (
-                new_rank > prev_rank
-                or score >= prev_conf + 0.12
-                or (
-                    not state.get("recorded")
-                    and majority == box["class"]
-                    and majority_n >= 3
-                    and new_rank >= prev_rank
-                )
-            )
-            if genuine:
-                state["class"] = box["class"]
-                if not state.get("recorded"):
-                    state["frames"] = 0
+        elif state["class"] != model_class:
+            # One noisy frame must not rename the object, but a sure or repeated
+            # new class must win quickly (each frame takes a few seconds here).
+            held_best = float(class_best.get(state["class"]) or 0)
+            recent = list(votes)[-2:]
+            repeated = len(recent) == 2 and all(name == model_class for name in recent)
+            sure = score >= record_conf and score > held_best
+            if repeated or sure:
+                state["class"] = model_class
+                state["frames"] = 0
+                state["display_hits"] = 0
+                state["qual_scores"] = []
             else:
                 box["class"] = state["class"]
                 box["raw_class"] = str(state["class"]).lower()
+                box["label_held"] = True
         state["class_votes"] = votes
-        state["frames"] += 1
+        state["class_best"] = class_best
         state["last_seen"] = now
+        state["last_confidence"] = score
+        # The score shown and saved belongs to the label shown.
+        state["best_conf"] = float(class_best.get(state["class"]) or 0)
+        if box["class"] in _STEADY_CLASSES and score >= STEADY_RECORD_CONF:
+            state["display_hits"] = int(state.get("display_hits") or 0) + 1
+        prev_box = state.get("last_box")
+        if isinstance(prev_box, dict):
+            for key in ("left", "top", "width", "height"):
+                if key not in box or key not in prev_box:
+                    continue
+                box[key] = round(0.72 * float(box[key]) + 0.28 * float(prev_box[key]), 2)
         state["last_box"] = _box_snapshot(box)
-        if box["class"] == state["class"]:
-            state["best_conf"] = max(float(state.get("best_conf") or 0), score)
+        state["frames"] = int(state.get("frames") or 0) + 1
         tracks[track_id] = state
         box["frames"] = state["frames"]
-        box["confirmed"] = state["frames"] >= min_frames and score >= record_conf
-        if (
-            state["frames"] >= min_frames
-            and score < record_conf
-            and not state.get("recorded")
-            and not state.get("threshold_logged")
-        ):
-            state["threshold_logged"] = True
-            print(
-                f"[detector] Track ID: {track_id} Class: {box['class']} "
-                f"Confidence: {score:.4f} Frame confirmation: {state['frames']}/{min_frames} "
-                f"Recorded: false Reason: confidence is below the recording threshold {record_conf}"
-            )
+        peak = round(float(state["best_conf"]), 4)
+        box["validation_confidence"] = peak
+        # The label shows the highest score. Recording still uses this frame's score.
+        box["confidence"] = peak
+        # Only this frame's own class can confirm a save; a held label never
+        # borrows the score of a different class.
+        ready = score >= record_conf and not box.get("label_held")
+        box["confirmed"] = bool(ready and not state.get("recorded"))
+        queued = float(state.get("queued_confidence") or 0)
+        box["confidence_upgrade"] = bool(state.get("recorded") and peak > queued + 0.005)
     for track_id in list(tracks):
         if track_id in seen:
             continue
         last_seen = float(tracks[track_id].get("last_seen") or 0)
-        if now - last_seen > timeout:
+        hold = timeout * 2.5 if tracks[track_id].get("recorded") else timeout
+        if now - last_seen > hold:
             del tracks[track_id]
     return boxes
 
@@ -1349,28 +1680,151 @@ def confirmed_events(
     record_conf: float,
     prevent_duplicate: bool = True,
 ) -> list[dict[str, Any]]:
-    """One database event per track. Scores under record_conf are shown, not stored.
+    """One new database event per track, on the first solid look.
 
-    cooldown_s is accepted so the existing detector setting can be passed through.
-    The current save decision does not use it.
+    cooldown_s and min_frames stay in the signature for the existing callers.
+    The save uses the track's highest score, not a three-frame average.
     """
-    del cooldown_s
+    del cooldown_s, min_frames, record_conf
     events: list[dict[str, Any]] = []
     for box in boxes:
         track_id = box.get("track_id")
         if track_id is None or not box.get("confirmed"):
-            continue
-        if float(box.get("confidence") or 0) < record_conf:
             continue
         state = tracks.get(track_id)
         if state is None:
             continue
         if prevent_duplicate and (state.get("recorded") or state.get("snapshot_saved")):
             continue
-        if state["frames"] < min_frames:
-            continue
+        if prevent_duplicate:
+            dup = recorded_track_for(tracks, box, track_id)
+            if dup is not None:
+                state["recorded"] = True
+                state["snapshot_saved"] = bool(dup.get("snapshot_saved") or state.get("snapshot_saved"))
+                if isinstance(dup.get("saved_id"), int):
+                    state["saved_id"] = dup["saved_id"]
+                box["confirmed"] = False
+                continue
         events.append(box)
     return events
+
+
+def retain_active_overlay_boxes(
+    boxes: list[dict[str, Any]],
+    tracks: dict[int, dict[str, Any]],
+    now: float,
+    lost_timeout_s: float,
+) -> list[dict[str, Any]]:
+    """Keep a box on screen while ByteTrack still owns the object.
+
+    Recording a detection does not remove it. A frame with no new box holds
+    the last position until the track expires. A box already in this frame
+    stays as it is.
+    """
+    present = {
+        box.get("track_id")
+        for box in boxes
+        if box.get("track_id") is not None
+    }
+    held = list(boxes)
+    timeout = max(0.0, float(lost_timeout_s))
+    for track_id, state in tracks.items():
+        if track_id in present:
+            continue
+        last_seen = float(state.get("last_seen") or 0)
+        if now - last_seen > timeout:
+            continue
+        last = state.get("last_box")
+        if not isinstance(last, dict):
+            continue
+        box = dict(last)
+        box["track_id"] = track_id
+        box["held"] = True
+        box["provisional"] = False
+        box["class"] = state.get("class") or box.get("class")
+        box["confidence"] = state.get("best_conf", state.get("last_confidence", box.get("confidence")))
+        box["frames"] = state.get("frames")
+        box["confirmed"] = bool(state.get("recorded"))
+        held.append(box)
+    return held
+
+
+# After a solid look, keep following the object down to this score.
+# Weaker hits stay off the screen so a cat is not boxed as foam.
+DISPLAY_CONF = 0.45
+# Draw a known class this weak. Saving still waits for the 80% line.
+DRAW_FLOOR = 0.40
+OVERLAY_HOLD_S = 16.0
+# A specific class is saved once it repeats at this score. A broad class
+# still needs one look at record_conf. Anything weaker can be a review.
+STEADY_RECORD_CONF = 0.62
+REVIEW_POSSIBLE_FLOOR = 0.50
+# These classes are specific enough to draw before the 80% save line,
+# once the same track repeats. Broad classes wait for 80%.
+_STEADY_CLASSES = {
+    "Can",
+    "Glass Bottle",
+    "Paper Drink Carton",
+    "Plastic Bottle",
+    "Plastic Cup",
+    "Plastic Spoon",
+    "Styro Cup",
+}
+
+
+def overlay_hold_seconds(configured: float) -> float:
+    """Keep the box through a few missed looks. Three seconds was too short."""
+    return max(OVERLAY_HOLD_S, float(configured))
+
+
+def adopt_existing_tracks(
+    boxes: list[dict[str, Any]],
+    tracks: dict[int, dict[str, Any]],
+    now: float,
+    lost_timeout_s: float,
+) -> None:
+    """Reuse the current track when ByteTrack assigns a new id to the same object."""
+    claimed = {
+        box.get("track_id")
+        for box in boxes
+        if box.get("track_id") in tracks
+    }
+    for box in boxes:
+        track_id = box.get("track_id")
+        if track_id in tracks:
+            continue
+        best_id = None
+        best_score = 0.0
+        for old_id, state in tracks.items():
+            if old_id in claimed:
+                continue
+            last = state.get("last_box")
+            if not isinstance(last, dict):
+                continue
+            recorded = bool(
+                state.get("recorded") or state.get("saved_id") or state.get("snapshot_saved")
+            )
+            hold = lost_timeout_s * 2.5 if recorded else lost_timeout_s
+            if now - float(state.get("last_seen") or 0) > hold:
+                continue
+            iou = _iou(box, last)
+            if not same_physical_object(box, last, box.get("class"), state.get("class")) and iou < 0.18:
+                continue
+            score = iou
+            if str(box.get("class") or "") == str(state.get("class") or ""):
+                score += 0.08
+            elif _class_family(box.get("class")) == _class_family(state.get("class")):
+                score += 0.04
+            if recorded:
+                score += 0.06
+            if score > best_score:
+                best_score = score
+                best_id = old_id
+        if best_id is None:
+            continue
+        box["track_id"] = best_id
+        box["id"] = f"track-{best_id}"
+        claimed.add(best_id)
 
 
 def boxes_from_result(result, conf_min: float) -> list[dict[str, Any]]:
@@ -1388,7 +1842,7 @@ def boxes_from_result(result, conf_min: float) -> list[dict[str, Any]]:
         if cls_id < 0 or cls_id >= len(names):
             continue
         label = canonical_waste_class(names[cls_id])
-        if not label:
+        if not label or is_excluded_class(label):
             continue
         raw = label.lower()
         x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
@@ -1453,7 +1907,7 @@ def summarize(boxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _fallback_detection_settings() -> dict[str, Any]:
     return {
-        "enabled": True,
+        "enabled": False,
         "confidence": float(settings.conf),
         "interval": 1,
         "classes": set(ONNX_CLASSES),
@@ -1462,13 +1916,61 @@ def _fallback_detection_settings() -> dict[str, Any]:
         "track_lost_timeout": float(settings.track_lost_timeout_seconds),
         "prevent_duplicate": True,
         "save_snapshots": True,
-        "review_conf": 0.50,
+        "review_conf": 0.60,
     }
 
 
 _DETECTION_SETTINGS_LOCK = Lock()
 _DETECTION_SETTINGS_CACHE: dict[str, Any] | None = None
 _DETECTION_SETTINGS_AT = 0.0
+_DETECTION_ENABLED_OVERRIDE: bool | None = None
+_DETECTION_ENABLED_OVERRIDE_UNTIL = 0.0
+
+
+def _effective_enabled(api_enabled: bool) -> bool:
+    global _DETECTION_ENABLED_OVERRIDE
+    if _DETECTION_ENABLED_OVERRIDE is None:
+        return api_enabled
+    if time.time() > _DETECTION_ENABLED_OVERRIDE_UNTIL:
+        _DETECTION_ENABLED_OVERRIDE = None
+        return api_enabled
+    if api_enabled == _DETECTION_ENABLED_OVERRIDE:
+        _DETECTION_ENABLED_OVERRIDE = None
+        return api_enabled
+    return _DETECTION_ENABLED_OVERRIDE
+
+
+def _blank_all_overlays() -> None:
+    with _lock:
+        states = list(_stream_states.values())
+    now = time.time()
+    for publish in states:
+        publish.last_boxes = []
+        publish.raw_boxes = []
+        publish.filtered_boxes = []
+        publish.annotated_jpeg = None
+        publish.overlay_published_at = now
+
+
+def apply_detection_enabled(enabled: bool) -> bool:
+    global _DETECTION_ENABLED_OVERRIDE, _DETECTION_ENABLED_OVERRIDE_UNTIL
+    global _DETECTION_SETTINGS_CACHE, _DETECTION_SETTINGS_AT
+    flag = bool(enabled)
+    _DETECTION_ENABLED_OVERRIDE = flag
+    _DETECTION_ENABLED_OVERRIDE_UNTIL = time.time() + 45.0
+    with _DETECTION_SETTINGS_LOCK:
+        current = dict(_DETECTION_SETTINGS_CACHE or _fallback_detection_settings())
+        current["enabled"] = flag
+        _DETECTION_SETTINGS_CACHE = current
+        # The stream loop reads this cache on its next tick. Stamp the time
+        # so that tick does not wait for a settings request that often times out.
+        _DETECTION_SETTINGS_AT = time.time()
+    if not flag:
+        _blank_all_overlays()
+    return flag
+
+
+SETTINGS_POLL_S = 3.0
 
 
 def _refresh_detection_settings(
@@ -1480,17 +1982,20 @@ def _refresh_detection_settings(
     global _DETECTION_SETTINGS_CACHE, _DETECTION_SETTINGS_AT
     now = time.time()
     with _DETECTION_SETTINGS_LOCK:
-        if _DETECTION_SETTINGS_AT and now - _DETECTION_SETTINGS_AT < 8.0:
+        # On/Off already arrives instantly through POST /runtime/detection, so
+        # Laravel is only re-read every few seconds. Laravel serves one request
+        # at a time on Windows; frequent polling here slows every dashboard page.
+        if _DETECTION_SETTINGS_AT and now - _DETECTION_SETTINGS_AT < SETTINGS_POLL_S:
             return (_DETECTION_SETTINGS_CACHE or current), _DETECTION_SETTINGS_AT
-        if now - fetched_at < 2.0:
+        if now - fetched_at < SETTINGS_POLL_S:
             return current, fetched_at
         # Claim the slot so the other three streams do not stampede Laravel.
         _DETECTION_SETTINGS_AT = now
     try:
         response = client.get(
-            f"{settings.api_base}/settings/detection",
+            f"{api_base()}/settings/detection",
             headers={"X-Detector-Key": settings.detector_key},
-            timeout=0.4,
+            timeout=1.5,
         )
         if response.status_code != 200:
             with _DETECTION_SETTINGS_LOCK:
@@ -1508,7 +2013,7 @@ def _refresh_detection_settings(
         min_frames = recording.get("min_confirmation_frames", settings.min_confirmation_frames)
         lost_timeout = recording.get("track_lost_timeout", settings.track_lost_timeout_seconds)
         parsed = {
-            "enabled": bool(body.get("enabled", True)),
+            "enabled": _effective_enabled(bool(body.get("enabled", False))),
             "confidence": min(MAX_DETECT_CONF, max(MIN_DETECT_CONF, confidence)),
             "interval": min(30, max(1, interval)),
             "classes": {str(name) for name in classes},
@@ -1519,7 +2024,7 @@ def _refresh_detection_settings(
             "save_snapshots": bool(recording.get("save_snapshots", True)),
             "review_conf": min(
                 MIN_DETECT_CONF - 0.01,
-                max(MIN_PROPOSAL_CONF, float(body.get("review_confidence", 0.50))),
+                max(MIN_PROPOSAL_CONF, float(body.get("review_confidence", 0.60))),
             ),
         }
         with _DETECTION_SETTINGS_LOCK:
@@ -1549,7 +2054,7 @@ def _overlay_confidence_floor(live: dict[str, Any]) -> float:
 
 
 def _hud_allowed_classes(live: dict[str, Any]) -> set[str]:
-    """Only the 13 CCTV classes can be drawn or recorded."""
+    """Only the 14 CCTV classes can be drawn or recorded."""
     del live
     return set(ONNX_CLASSES)
 
@@ -1589,7 +2094,7 @@ def _apply_detection_settings(
 
 def _review_confidence_floor(live: dict[str, Any]) -> float:
     live_floor = _overlay_confidence_floor(live)
-    review_floor = float(live.get("review_conf", 0.50))
+    review_floor = float(live.get("review_conf", 0.60))
     return min(live_floor - 0.01, max(MIN_PROPOSAL_CONF, review_floor))
 
 
@@ -1597,22 +2102,9 @@ def _low_confidence_review_boxes(
     boxes: list[dict[str, Any]],
     live: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Known-class boxes below the live 80% floor, at or above the review floor.
-
-    These are queued for Missed Detection Review. They are not live detections.
-    """
-    allowed = _hud_allowed_classes(live)
-    live_floor = _overlay_confidence_floor(live)
-    review_floor = _review_confidence_floor(live)
-    kept: list[dict[str, Any]] = []
-    for box in boxes:
-        label = canonical_waste_class(str(box.get("class") or "")) or str(box.get("class") or "")
-        if not _class_allowed(label, allowed):
-            continue
-        score = float(box.get("confidence") or 0)
-        if review_floor <= score < live_floor:
-            kept.append(box)
-    return kept
+    """Low-confidence classes are not queued. An admin moves them from Detections."""
+    del boxes, live
+    return []
 
 
 def publish_overlay_boxes(
@@ -1658,13 +2150,92 @@ def publish_overlay_boxes(
     _publish_stream(camera_id, publish)
 
 
-def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
+_camera_ingest_blocked_until: dict[str, float] = {}
+
+
+def camera_ingest_allowed(camera_id: str, now: float | None = None) -> bool:
+    until = _camera_ingest_blocked_until.get(str(camera_id), 0.0)
+    return (time.time() if now is None else now) >= until
+
+
+def block_camera_ingest(camera_id: str, seconds: float = 300.0, now: float | None = None) -> None:
+    """Stop posting records for a camera Laravel does not have."""
+    _camera_ingest_blocked_until[str(camera_id)] = (
+        time.time() if now is None else now
+    ) + max(1.0, float(seconds))
+
+
+def ingest_looks_like_missing_camera(status_code: int | None, text: str) -> bool:
+    if int(status_code or 0) != 422:
+        return False
+    return "camera not found" in str(text or "").lower()
+
+
+def _detections_payload(pending: dict[int, dict[str, Any]], track_ids: list[int], *, include_snapshot: bool) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for track_id in track_ids:
+        row = dict(pending.get(track_id) or {})
+        if not include_snapshot:
+            row.pop("snapshot", None)
+        rows.append(row)
+    return rows
+
+
+def _post_json_job(job: dict[str, Any], url: str, payload: dict[str, Any], headers: dict[str, str]) -> None:
+    """POST without holding the camera loop. A slow save must not hide boxes."""
+    try:
+        response = httpx.post(url, json=payload, headers=headers, timeout=120.0)
+        job["status"] = response.status_code
+        job["text"] = response.text[:400]
+        if response.status_code in (200, 201):
+            job["body"] = response.json()
+    except Exception as exc:  # noqa: BLE001
+        job["error"] = exc
+    finally:
+        job["done"] = True
+
+
+def _start_json_job(url: str, payload: dict[str, Any], headers: dict[str, str], **extra: Any) -> dict[str, Any]:
+    job: dict[str, Any] = {"done": False, "error": None, "body": None, "status": None, "text": ""}
+    job.update(extra)
+    Thread(
+        target=_post_json_job,
+        args=(job, url, payload, headers),
+        daemon=True,
+    ).start()
+    return job
+
+
+def _saved_ids_from_body(
+    body: dict[str, Any] | None,
+    key: str = "detections",
+    any_id: bool = False,
+) -> dict[int, int | None]:
+    saved: dict[int, int | None] = {}
+    for item in (body or {}).get(key) or []:
+        subtitle = str(item.get("subtitle") or "")
+        if "Track " not in subtitle:
+            continue
+        try:
+            track_match = int(subtitle.split("Track ", 1)[1].split(" ", 1)[0])
+        except ValueError:
+            continue
+        detection_id = item.get("id")
+        if isinstance(detection_id, int) or any_id:
+            saved[track_match] = detection_id if isinstance(detection_id, int) else None
+    return saved
+
+
+def stream_worker_loop(cfg: StreamConfig, model, model_label: str, stop_event: Event | None = None) -> None:
     """Independent detection loop for one camera/lens stream."""
+    # Cameras added from the dashboard get their own stop switch, so one can be
+    # stopped without touching the others. CAM-01/CAM-02 keep the global one.
+    stop = stop_event or _stop
     camera_id = cfg.stream_key
     publish = StreamPublishState(ready=True)
     reader = LatestFrameReader(
         name=camera_id,
-        stop_event=_stop,
+        stop_event=stop,
         reconnect_s=settings.stream_reconnect_s,
         capture_interval_s=settings.stream_capture_interval_s,
     )
@@ -1689,22 +2260,97 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
         morph_kernel=settings.motion_morph_kernel,
         learning_rate=settings.motion_learning_rate,
     )
-    presence_book = PresenceBook(settings.absence_frames)
+    presence_book = PresenceBook(
+        settings.absence_frames,
+        absence_seconds=(float(settings.absence_seconds) if float(settings.absence_seconds) > 0 else None),
+        min_absent_frames=settings.absence_min_frames,
+    )
     motion_box_fraction = max(0.0, float(settings.motion_box_fraction))
     last_unfamiliar_at = time.time()
-    last_lowconf_at = 0.0
+    last_presence_at = 0.0
     print(f"[detector] stream {camera_id} · src={cfg.go2rtc_src} · session {tracker_session}")
     _publish_stream(camera_id, publish)
 
-    with httpx.Client(timeout=25.0) as client:
-        while not _stop.is_set():
+    # Saves use their own 120s request off this loop. This client must stay
+    # short so a busy API cannot freeze the overlay.
+    save_job: dict[str, Any] | None = None
+    status_job: dict[str, Any] | None = None
+    save_retry_at = 0.0
+    with httpx.Client(timeout=8.0) as client:
+        while not stop.is_set():
+            if save_job is not None and save_job.get("done"):
+                sending_ids = list(save_job.get("ids") or [])
+                error = save_job.get("error")
+                status_code = save_job.get("status")
+                if error is not None or status_code not in (200, 201):
+                    save_retry_at = time.time() + 3.0
+                    fail_text = str(error or save_job.get("text") or status_code)
+                    print(f"[detector] {camera_id} save failed: {fail_text}")
+                    if ingest_looks_like_missing_camera(status_code, fail_text):
+                        block_camera_ingest(camera_id, 300.0)
+                        pending_saves.clear()
+                        print(
+                            f"[detector] {camera_id} ingest paused — camera is not in Laravel"
+                        )
+                else:
+                    save_retry_at = 0.0
+                    saved_ids = _saved_ids_from_body(save_job.get("body"))
+                    reviewed = _saved_ids_from_body(save_job.get("body"), key="reviews", any_id=True)
+                    for track_id in sending_ids:
+                        # A review-only row is sent once even if the API skipped it
+                        # (e.g. below the review floor), so it is not resent each frame.
+                        if track_id not in reviewed and not (pending_saves.get(track_id) or {}).get("review_only"):
+                            continue
+                        state = tracks.get(track_id)
+                        if state is not None:
+                            state["review_sent"] = True
+                        pending_saves.pop(track_id, None)
+                    if reviewed:
+                        print(
+                            f"[detector] {camera_id} below 80%, Detection Reviews only: "
+                            f"{sorted(reviewed)}"
+                        )
+                    recorded_now = []
+                    for track_id in sending_ids:
+                        state = tracks.get(track_id)
+                        detection_id = saved_ids.get(track_id)
+                        if detection_id is None or state is None:
+                            continue
+                        state["recorded"] = bool(live_detection["prevent_duplicate"])
+                        state["snapshot_saved"] = bool(live_detection["save_snapshots"])
+                        state["saved_id"] = detection_id
+                        state["review_sent"] = True
+                        state["debug_logged"] = True
+                        pending_saves.pop(track_id, None)
+                        recorded_now.append((track_id, detection_id))
+                    if recorded_now:
+                        print(f"[detector] {camera_id} saved {recorded_now}")
+                    missing = [track_id for track_id in sending_ids if track_id in pending_saves]
+                    if missing:
+                        print(f"[detector] {camera_id} save missing id for tracks {missing}")
+                save_job = None
+            if status_job is not None and status_job.get("done"):
+                error = status_job.get("error")
+                status_code = status_job.get("status")
+                if error is not None or status_code not in (200, 201):
+                    for row in status_job.get("rows") or []:
+                        watch = presence_book.watch.get(row.get("detection_id"))
+                        if watch is not None and row.get("status") in ("No Longer Visible", "Confirmed Cleaned"):
+                            watch["sent"] = False
+                    print(
+                        f"[detector] {camera_id} presence update failed: "
+                        f"{error or status_job.get('text') or status_code}"
+                    )
+                else:
+                    print(f"[detector] {camera_id} presence {status_job.get('rows')}")
+                status_job = None
             t0 = time.perf_counter()
             live_detection, settings_fetched_at = _refresh_detection_settings(
                 client,
                 live_detection,
                 settings_fetched_at,
             )
-            if not live_detection.get("enabled", True):
+            if not live_detection.get("enabled", False):
                 frame, _frame_id, _captured_at = reader.latest()
                 publish.connected = bool(reader.connected and frame is not None)
                 publish.last_boxes = []
@@ -1718,7 +2364,7 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                     pending_saves.clear()
                     tracker = new_byte_tracker()
                 _publish_stream(camera_id, publish)
-                _stop.wait(0.25)
+                stop.wait(0.25)
                 continue
             frame, frame_id, captured_at = reader.latest()
             publish.connected = reader.connected
@@ -1741,10 +2387,10 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                     publish.overlay_published_at = time.time()
                 publish.last_error = reader.last_error or "waiting for frame"
                 _publish_stream(camera_id, publish)
-                _stop.wait(0.02)
+                stop.wait(0.02)
                 continue
             if frame_id == last_frame_id:
-                _stop.wait(0.02)
+                stop.wait(0.02)
                 continue
             # Brief gaps must NOT wipe ByteTrack — that drops track IDs.
             if consecutive_misses > 0:
@@ -1755,7 +2401,7 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
             # Rate limit by INTERVAL_S only (settings interval capped at 1 for HUD).
             gap = max(0.15, float(settings.interval_s))
             if last_overlay_publish_at and (time.time() - last_overlay_publish_at) < gap:
-                _stop.wait(0.01)
+                stop.wait(0.01)
                 continue
 
             vis = frame
@@ -1777,14 +2423,16 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                     max(MIN_PROPOSAL_CONF, float(settings.proposal_conf)),
                 )
                 review_out: list[dict[str, Any]] = []
+                wait_for_paired_wide(camera_id)
                 raw_boxes = track_frame_boxes(
-                    model,
+                    live_model() or model,
                     frame,
                     proposal,
                     settings.iou,
                     _model_classes,
                     tracker=tracker,
                     inference_lock=_inference_lock,
+                    mode=stream_detection_mode(cfg.go2rtc_src),
                     review_out=review_out,
                 )
                 for box in raw_boxes:
@@ -1792,48 +2440,74 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                     box["stream_src"] = cfg.go2rtc_src
                     box["frame_id"] = frame_id
                 overlay_boxes = filter_overlay_boxes(raw_boxes)
-                filtered = _apply_detection_settings(
-                    overlay_boxes,
-                    live_detection,
-                )
-                review_candidates = _low_confidence_review_boxes(
-                    overlay_boxes,
-                    live_detection,
-                )
                 now = time.time()
+                record_conf = float(live_detection["record_conf"])
+                hold_s = overlay_hold_seconds(float(live_detection["track_lost_timeout"]))
+                adopt_existing_tracks(overlay_boxes, tracks, now, hold_s)
+                # Follow a box that has already qualified so a dip under 80%
+                # does not erase it. A new broad label still has to clear 80%.
+                followed = []
+                for box in overlay_boxes:
+                    score = float(box.get("confidence") or 0)
+                    track_id = box.get("track_id")
+                    label = canonical_waste_class(str(box.get("class") or ""))
+                    known = track_id is not None and track_id in tracks
+                    if score >= record_conf or (known and score >= DISPLAY_CONF):
+                        followed.append(box)
+                    elif label in _STEADY_CLASSES and score >= 0.62:
+                        followed.append(box)
+                    elif box.get("provisional") and score >= DRAW_FLOOR:
+                        followed.append(box)
                 boxes = update_tracks(
                     tracks,
-                    filtered,
+                    followed,
                     now,
                     int(live_detection["min_frames"]),
-                    float(live_detection["record_conf"]),
-                    float(live_detection["track_lost_timeout"]),
+                    record_conf,
+                    hold_s,
                 )
-                annotate_detection_stages(boxes, tracks)
+                visible = []
                 for box in boxes:
+                    track_id = box.get("track_id")
+                    state = tracks.get(track_id) if track_id is not None else None
+                    score = float(box.get("confidence") or 0)
+                    if state is not None and (
+                        score >= record_conf
+                        or int(state.get("display_hits") or 0) >= 2
+                        or state.get("recorded")
+                    ):
+                        state["shown"] = True
+                    if state is not None and state.get("shown") and score >= DISPLAY_CONF:
+                        box["provisional"] = False
+                        visible.append(box)
+                    elif box.get("provisional") and score >= DRAW_FLOOR:
+                        visible.append(box)
+                    elif state is not None and score >= DRAW_FLOOR:
+                        box["provisional"] = True
+                        visible.append(box)
+                annotate_detection_stages(visible, tracks)
+                shown_tracks = {
+                    tid: state
+                    for tid, state in tracks.items()
+                    if state.get("shown") or state.get("recorded")
+                }
+                hud_boxes_out = retain_active_overlay_boxes(
+                    visible,
+                    shown_tracks,
+                    now,
+                    hold_s,
+                )
+                annotate_detection_stages(hud_boxes_out, tracks)
+                hud_boxes_out = [dict(box) for box in hud_boxes_out]
+                for box in hud_boxes_out:
                     box["camera_id"] = camera_id
                     box["stream_src"] = cfg.go2rtc_src
                     box["frame_id"] = frame_id
-                hud_boxes_out = list(boxes)
-                seen = {
-                    (round(float(b.get("left") or 0), 2), round(float(b.get("top") or 0), 2), str(b.get("class") or ""))
-                    for b in hud_boxes_out
-                }
-                for box in review_candidates:
-                    key = (
-                        round(float(box.get("left") or 0), 2),
-                        round(float(box.get("top") or 0), 2),
-                        str(box.get("class") or ""),
-                    )
-                    if key in seen:
-                        continue
-                    drawn = dict(box)
-                    drawn["provisional"] = True
-                    drawn["camera_id"] = camera_id
-                    drawn["stream_src"] = cfg.go2rtc_src
-                    drawn["frame_id"] = frame_id
-                    hud_boxes_out.append(drawn)
-                    seen.add(key)
+                    box["provisional"] = False
+                    track_id = box.get("track_id")
+                    state = tracks.get(track_id) if track_id is not None else None
+                    if state is not None and isinstance(state.get("saved_id"), int):
+                        box["detection_id"] = int(state["saved_id"])
                 infer_ms = int((time.perf_counter() - t_infer0) * 1000)
                 infer_count += 1
                 for rejected in review_out:
@@ -1847,7 +2521,7 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                 if infer_count % 30 == 0:
                     print(
                         f"[detector] {camera_id} infer_ms={infer_ms} "
-                        f"raw={len(raw_boxes)} kept={len(filtered)} "
+                        f"raw={len(raw_boxes)} kept={len(visible)} "
                         f"uncertain={len(review_out)}"
                     )
 
@@ -1923,6 +2597,50 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                             "duplicate_check": "REJECT",
                             "reason": "already_recorded",
                         })
+                snapshot_cache: list[str | None] = []
+
+                def frame_snapshot() -> str | None:
+                    # Encode this frame once, even when several waste items are saved from it.
+                    if not snapshot_cache:
+                        snapshot_cache.append(full_frame_jpeg(frame))
+                    return snapshot_cache[0]
+
+                # Detection Reviews: tracks that stay in the 60-79% band. They never
+                # reach record_conf, so they are not save events; send each one once
+                # (full frame) after it has been seen for MIN_CONFIRMATION_FRAMES.
+                review_floor = _review_confidence_floor(live_detection)
+                review_frames = max(1, int(live_detection["min_frames"]))
+                for row in boxes:
+                    track_id = row.get("track_id")
+                    state = tracks.get(track_id) if track_id is not None else None
+                    if state is None or track_id in pending_saves:
+                        continue
+                    if state.get("recorded") or state.get("review_sent"):
+                        continue
+                    if canonical_waste_class(str(row.get("class") or "")) not in ONNX_CLASSES:
+                        continue
+                    peak = float(row.get("validation_confidence", row.get("confidence") or 0))
+                    if not (review_floor <= peak < WASTE_DETECTION_MIN_CONF):
+                        continue
+                    if int(state.get("frames") or 0) < review_frames:
+                        continue
+                    pending_saves[track_id] = {
+                        "class": row["class"],
+                        "confidence": peak,
+                        "count": 1,
+                        "severity": row.get("severity") or "alert",
+                        "sector": cfg.sector,
+                        "subtitle": f"Track {track_id} · YOLO · {camera_id} · {cfg.go2rtc_src}",
+                        "frame_id": frame_id,
+                        "left": row.get("left"),
+                        "top": row.get("top"),
+                        "width": row.get("width"),
+                        "height": row.get("height"),
+                        "review_only": True,
+                        "snapshot": None,
+                        "review_snapshot": frame_snapshot(),
+                    }
+
                 for row in events:
                     if canonical_waste_class(str(row.get("class") or "")) not in ONNX_CLASSES:
                         continue
@@ -1932,12 +2650,40 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                         continue
                     if live_detection["prevent_duplicate"] and state.get("recorded"):
                         continue
+                    peak = float(row.get("validation_confidence", row["confidence"]))
+                    if peak < WASTE_DETECTION_MIN_CONF:
+                        # Not sure enough for Waste Detections: send the full frame
+                        # to Detection Reviews once, and keep watching this track.
+                        # Only 60-79% is saved (Settings > Detection > Review confidence).
+                        if state.get("review_sent") or peak < _review_confidence_floor(live_detection):
+                            continue
+                        pending_saves[track_id] = {
+                            "class": row["class"],
+                            "confidence": peak,
+                            "count": 1,
+                            "severity": row["severity"],
+                            "sector": cfg.sector,
+                            "subtitle": (
+                                f"Track {track_id} · YOLO · {camera_id} · {cfg.go2rtc_src}"
+                            ),
+                            "frame_id": frame_id,
+                            "left": row.get("left"),
+                            "top": row.get("top"),
+                            "width": row.get("width"),
+                            "height": row.get("height"),
+                            "review_only": True,
+                            "snapshot": None,
+                            "review_snapshot": frame_snapshot(),
+                        }
+                        continue
                     state["recorded"] = True
                     state["snapshot_saved"] = bool(live_detection["save_snapshots"])
                     state["debug_logged"] = True
+                    save_class = row["class"]
+                    state["queued_confidence"] = peak
                     pending_saves[track_id] = {
-                        "class": row["class"],
-                        "confidence": row["confidence"],
+                        "class": save_class,
+                        "confidence": peak,
                         "count": 1,
                         "severity": row["severity"],
                         "sector": cfg.sector,
@@ -1950,12 +2696,60 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                         "width": row.get("width"),
                         "height": row.get("height"),
                         "histogram": hue_histogram(frame, row),
+                        # Zoomed snapshot for Waste Detections.
                         "snapshot": (
                             crop_confirmed_jpeg(frame, row)
                             if live_detection["save_snapshots"]
                             else None
                         ),
+                        # Full livestream frame for Detection Reviews (once per track).
+                        "review_snapshot": (
+                            None  # 80%+ stays in Waste Detections only
+                        ),
                     }
+                inflight_ids = set((save_job or {}).get("ids") or [])
+                for box in boxes:
+                    if not box.get("confidence_upgrade"):
+                        continue
+                    track_id = box.get("track_id")
+                    state = tracks.get(track_id) if track_id is not None else None
+                    if track_id is None or state is None or track_id in inflight_ids:
+                        continue
+                    peak = float(box.get("validation_confidence") or state.get("best_conf") or 0)
+                    if track_id in pending_saves:
+                        if pending_saves[track_id].get("review_only"):
+                            continue
+                        pending_saves[track_id]["confidence"] = peak
+                        state["queued_confidence"] = peak
+                        continue
+                    if not state.get("recorded"):
+                        # The save loop above decides when a track enters Waste Detections.
+                        continue
+                    if live_detection["prevent_duplicate"] and (
+                        state.get("recorded")
+                        or recorded_track_for(tracks, box, track_id, set(pending_saves))
+                    ):
+                        continue
+                    state["queued_confidence"] = peak
+                    pending_saves[track_id] = {
+                        "class": state.get("class") or box.get("class"),
+                        "confidence": peak,
+                        "count": 1,
+                        "severity": box.get("severity") or "alert",
+                        "sector": cfg.sector,
+                        "subtitle": (
+                            f"Track {track_id} · YOLO · {camera_id} · {cfg.go2rtc_src}"
+                        ),
+                        "frame_id": frame_id,
+                        "left": box.get("left"),
+                        "top": box.get("top"),
+                        "width": box.get("width"),
+                        "height": box.get("height"),
+                        "histogram": hue_histogram(frame, box),
+                        "snapshot": None,
+                    }
+                # Below 80%: Detection Reviews only (full frame). 80% and up: Waste
+                # Detections (zoomed snapshot) plus one full frame in Detection Reviews.
                 fh, fw = frame.shape[:2]
                 ms = max(infer_ms, int((time.perf_counter() - t0) * 1000))
                 # Refresh stages after confirmation/save flags may have changed.
@@ -1973,7 +2767,7 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                         publish.last_jpeg = jpeg
                 publish.last_ms = infer_ms
                 publish.raw_boxes = raw_boxes
-                publish.filtered_boxes = filtered
+                publish.filtered_boxes = visible
                 publish.last_boxes = hud_boxes_out
                 publish.frame_w = fw
                 publish.frame_h = fh
@@ -1997,6 +2791,11 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                 ]
                 _publish_stream(camera_id, publish)
 
+                live_track_ids = {
+                    box.get("track_id")
+                    for box in followed
+                    if box.get("track_id") is not None
+                }
                 active_saved = {
                     tid: {
                         "detection_id": int(state["saved_id"]),
@@ -2004,151 +2803,98 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
                         "class": state.get("class"),
                     }
                     for tid, state in tracks.items()
-                    if isinstance(state.get("saved_id"), int)
+                    if tid in live_track_ids and isinstance(state.get("saved_id"), int)
                 }
+                visible_detection_ids = [
+                    int(state["saved_id"])
+                    for tid, state in tracks.items()
+                    if tid in live_track_ids and isinstance(state.get("saved_id"), int)
+                ]
                 status_updates = presence_book.step(
                     active_saved,
                     motion_mask,
                     stream_ok=reader.connected,
+                    scene_boxes=list(raw_boxes),
                 )
 
                 unfamiliar_due = (
                     time.time() - last_unfamiliar_at
                     >= max(20.0, float(settings.unfamiliar_interval_s))
                 )
-                lowconf_due = (
-                    time.time() - last_lowconf_at
-                    >= max(20.0, float(settings.unfamiliar_interval_s))
-                )
-                if frame is not None and review_candidates and lowconf_due:
-                    last_lowconf_at = time.time()
-                    report_low_confidence_classes(
-                        client,
-                        camera_id,
-                        frame,
-                        review_candidates,
-                    )
+                # Low-confidence guesses were filling Detection Reviews with the
+                # wrong class and holding the API so approve/delete timed out.
+                # A person moves a real detection to review. Do not auto-queue these.
 
-                if frame is not None and (pending_saves or unfamiliar_due):
-                    last_unfamiliar_at = time.time()
-                    review_unfamiliar_frame(
-                        client,
-                        camera_id,
-                        frame,
-                        boxes,
-                        pending_saves,
-                    )
+                # One camera scans for unknown objects at a time. Four scans in a
+                # row were stalling YOLO long enough for the boxes to drop off.
+                if (
+                    frame is not None
+                    and unfamiliar_due
+                    and not pending_saves
+                    and camera_ingest_allowed(camera_id)
+                    and _unfamiliar_gate.acquire(blocking=False)
+                ):
+                    try:
+                        global _unfamiliar_global_at
+                        if time.time() - _unfamiliar_global_at < 60:
+                            last_unfamiliar_at = time.time()
+                        else:
+                            _unfamiliar_global_at = time.time()
+                            last_unfamiliar_at = _unfamiliar_global_at
+                            review_unfamiliar_frame(
+                                client,
+                                camera_id,
+                                frame,
+                                boxes,
+                                pending_saves,
+                            )
+                    finally:
+                        _unfamiliar_gate.release()
 
-                if pending_saves:
+                if not camera_ingest_allowed(camera_id):
+                    pending_saves.clear()
+                    status_updates = []
+
+                if pending_saves and save_job is None and time.time() >= save_retry_at:
                     sending_ids = list(pending_saves)
-                    response = client.post(
-                        f"{settings.api_base}/detections/live",
-                        json={
+                    retrying = save_retry_at > 0.0
+                    print(f"[detector] {camera_id} saving tracks {sending_ids}")
+                    save_job = _start_json_job(
+                        f"{api_base()}/detections/live",
+                        {
                             "camera_id": camera_id,
-                            "boxes": boxes,
+                            "boxes": [],
                             "inference_ms": ms,
                             "model": model_label,
                             "tracker_session": tracker_session,
-                            "detections": list(pending_saves.values()),
+                            "detections": _detections_payload(
+                                pending_saves,
+                                sending_ids,
+                                include_snapshot=not retrying,
+                            ),
                         },
-                        headers={"X-Detector-Key": settings.detector_key},
+                        {"X-Detector-Key": settings.detector_key},
+                        ids=sending_ids,
                     )
-                    if response.status_code not in (200, 201):
-                        for track_id in sending_ids:
-                            payload = pending_saves.get(track_id) or {}
-                            state = tracks.get(track_id) or {}
-                            _record_debug({
-                                "camera_id": camera_id,
-                                "class": payload.get("class"),
-                                "confidence": payload.get("confidence"),
-                                "track_id": track_id,
-                                "confirmation": f"{state.get('frames')}/{settings.min_confirmation_frames}",
-                                "confirmed": "true",
-                                "recorded": "false",
-                                "duplicate_check": "PASS",
-                                "api": f"POST {settings.api_base}/detections/live",
-                                "status": response.status_code,
-                                "detection_id": "none",
-                                "reason": response.text[:300],
-                            })
-                        raise RuntimeError(
-                            f"detections/live HTTP {response.status_code} {response.text[:400]}"
-                        )
-                    body = response.json()
-                    saved_ids: dict[int, int] = {}
-                    for item in body.get("detections") or []:
-                        track_match = None
-                        subtitle = str(item.get("subtitle") or "")
-                        if "Track " in subtitle:
-                            try:
-                                track_match = int(subtitle.split("Track ", 1)[1].split(" ", 1)[0])
-                            except ValueError:
-                                track_match = None
-                        detection_id = item.get("id")
-                        if track_match is not None and isinstance(detection_id, int):
-                            saved_ids[track_match] = detection_id
-                    recorded_now = []
-                    for track_id in sending_ids:
-                        payload = pending_saves.get(track_id) or {}
-                        state = tracks.get(track_id)
-                        detection_id = saved_ids.get(track_id)
-                        _record_debug({
-                            "camera_id": camera_id,
-                            "class": payload.get("class"),
-                            "confidence": payload.get("confidence"),
-                            "track_id": track_id,
-                            "confirmation": (
-                                f"{(state or {}).get('frames')}/{settings.min_confirmation_frames}"
-                            ),
-                            "confirmed": "true",
-                            "recorded": "false",
-                            "duplicate_check": "PASS",
-                            "api": f"POST {settings.api_base}/detections/live",
-                            "status": response.status_code,
-                            "detection_id": detection_id if detection_id is not None else "missing",
-                            "reason": (
-                                "saved"
-                                if detection_id is not None
-                                else "response_missing_detection_id"
-                            ),
-                        })
-                        if detection_id is None or state is None:
-                            continue
-                        state["recorded"] = bool(live_detection["prevent_duplicate"])
-                        state["snapshot_saved"] = bool(live_detection["save_snapshots"])
-                        state["saved_id"] = detection_id
-                        state["debug_logged"] = True
-                        pending_saves.pop(track_id, None)
-                        recorded_now.append((track_id, detection_id))
-                    if recorded_now:
-                        print(f"[detector] {camera_id} saved {recorded_now}")
 
-                if status_updates:
-                    try:
-                        status_response = client.post(
-                            f"{settings.api_base}/detections/live",
-                            json={
-                                "camera_id": camera_id,
-                                "boxes": [],
-                                "inference_ms": ms,
-                                "model": model_label,
-                                "tracker_session": tracker_session,
-                                "detections": [],
-                                "status_updates": status_updates,
-                            },
-                            headers={"X-Detector-Key": settings.detector_key},
-                        )
-                        if status_response.status_code not in (200, 201):
-                            raise RuntimeError(
-                                f"status HTTP {status_response.status_code} {status_response.text[:300]}"
-                            )
-                        print(f"[detector] {camera_id} presence {status_updates}")
-                    except Exception as exc:  # noqa: BLE001
-                        for row in status_updates:
-                            watch = presence_book.watch.get(row.get("detection_id"))
-                            if watch is not None and row.get("status") == "Confirmed Cleaned":
-                                watch["sent"] = False
-                        print(f"[detector] {camera_id} presence update failed: {exc}")
+                presence_due = status_updates or (time.time() - last_presence_at >= 2.0)
+                if presence_due and status_job is None and camera_ingest_allowed(camera_id):
+                    last_presence_at = time.time()
+                    status_job = _start_json_job(
+                        f"{api_base()}/detections/live",
+                        {
+                            "camera_id": camera_id,
+                            "boxes": [],
+                            "inference_ms": ms,
+                            "model": model_label,
+                            "tracker_session": tracker_session,
+                            "detections": [],
+                            "status_updates": status_updates,
+                            "visible_detection_ids": visible_detection_ids,
+                        },
+                        {"X-Detector-Key": settings.detector_key},
+                        rows=list(status_updates),
+                    )
             except Exception as exc:  # noqa: BLE001
                 publish.last_error = str(exc)
                 _publish_stream(camera_id, publish)
@@ -2158,7 +2904,7 @@ def stream_worker_loop(cfg: StreamConfig, model, model_label: str) -> None:
             # sleep leftover time after a slow infer — that delays the next frame.
 
 
-# Open-vocabulary prompts that are not in weights (4). Hits go to review, not detections.
+# Open-vocabulary prompts that are not in weights (7). Hits go to review, not detections.
 UNFAMILIAR_PROMPTS = [
     "plastic bag",
     "shoe",
@@ -2177,6 +2923,115 @@ WORLD_WEIGHTS = Path(__file__).with_name("yolov8s-worldv2.pt")
 _world_model = None
 _world_disabled = False
 _unfamiliar_seen: dict[tuple, float] = {}
+_unfamiliar_gate = Lock()
+_unfamiliar_global_at = 0.0
+
+
+def _gateway_stream_names(client: httpx.Client) -> set[str] | None:
+    try:
+        response = client.get(f"{settings.go2rtc_base.rstrip('/')}/api/streams", timeout=3)
+        if response.status_code == 200 and isinstance(response.json(), dict):
+            return set(response.json().keys())
+    except Exception:
+        return None
+    return None
+
+
+def _gateway_add_stream(client: httpx.Client, name: str, source: str) -> bool:
+    try:
+        response = client.put(
+            f"{settings.go2rtc_base.rstrip('/')}/api/streams",
+            params={"name": name, "src": source},
+            timeout=5,
+        )
+        return response.status_code < 300
+    except Exception:
+        return False
+
+
+def managed_camera_loop(model, model_label: str) -> None:
+    """
+    IP cameras added from the dashboard (Laravel /detector/cameras).
+    Every MANAGED_CAMERAS_POLL_S: make sure go2rtc has each stream (it may have
+    restarted), start detection for new or switched-on cameras, and stop it for
+    removed or switched-off ones. Cameras from DETECTOR_STREAMS are skipped.
+    """
+    from urllib.parse import quote
+
+    running: dict[str, tuple[StreamConfig, Event, Thread]] = {}
+    base = settings.go2rtc_base.rstrip("/")
+    with httpx.Client() as client:
+        while not _stop.is_set():
+            rows = None
+            try:
+                response = client.get(
+                    f"{api_base()}/detector/cameras",
+                    headers={"X-Detector-Key": settings.detector_key},
+                    timeout=5,
+                )
+                if response.status_code == 200:
+                    rows = response.json().get("cameras") or []
+            except Exception:
+                rows = None
+
+            if rows is not None:
+                gateway = _gateway_stream_names(client)
+                wanted: dict[str, StreamConfig] = {}
+                for row in rows:
+                    cam = str(row.get("camera_id") or "").strip().upper()
+                    src = str(row.get("go2rtc_src") or "").strip()
+                    if not cam or not src or cam in _env_stream_ids:
+                        continue
+                    source = str(row.get("source") or "")
+                    if gateway is not None and src not in gateway and source:
+                        if _gateway_add_stream(client, src, source):
+                            print(f"[detector] gateway: added {src} for {cam}")
+                    if not row.get("detection", True):
+                        continue
+                    wanted[cam] = StreamConfig(
+                        camera_id=cam,
+                        go2rtc_src=src,
+                        rtsp_url="",
+                        jpeg_url=f"{base}/api/frame.jpeg?src={quote(src, safe='')}",
+                        enabled=True,
+                        label=str(row.get("label") or cam),
+                        sector=str(row.get("sector") or settings.sector),
+                    )
+
+                for cam in list(running):
+                    cfg, stop_switch, thread = running[cam]
+                    if wanted.get(cam) == cfg:
+                        continue
+                    stop_switch.set()
+                    thread.join(timeout=5)
+                    running.pop(cam, None)
+                    with _lock:
+                        _stream_states.pop(cam, None)
+                        _stream_configs[:] = [c for c in _stream_configs if c.stream_key != cam]
+                    print(f"[detector] dashboard camera stopped: {cam}")
+
+                for cam, cfg in wanted.items():
+                    if cam in running:
+                        continue
+                    stop_switch = Event()
+                    thread = Thread(
+                        target=stream_worker_loop,
+                        args=(cfg, model, model_label, stop_switch),
+                        name=f"yolo-{cam}",
+                        daemon=True,
+                    )
+                    thread.start()
+                    running[cam] = (cfg, stop_switch, thread)
+                    with _lock:
+                        _stream_configs.append(cfg)
+                    print(f"[detector] dashboard camera started: {cam} src={cfg.go2rtc_src} label={cfg.label}")
+
+            _stop.wait(MANAGED_CAMERAS_POLL_S)
+
+    for _cfg, stop_switch, thread in running.values():
+        stop_switch.set()
+    for _cfg, _stop_switch, thread in running.values():
+        thread.join(timeout=3)
 
 
 def unfamiliar_prompts() -> list[str]:
@@ -2220,7 +3075,7 @@ def _unit_box(box: dict[str, Any]) -> dict[str, float]:
 
 
 def _unfamiliar_proposals(frame) -> list[dict[str, Any]]:
-    """Open-vocabulary hits that are not one of the 13 CCTV classes."""
+    """Open-vocabulary hits that are not one of the 14 CCTV classes."""
     world = _load_world_model()
     prompts = unfamiliar_prompts()
     if world is None or not prompts or frame is None:
@@ -2314,6 +3169,7 @@ def _post_review_proposal(
     frame,
     proposal: dict[str, Any],
     reason: str,
+    reserved: bool = False,
 ) -> bool:
     unit = {
         "x": float(proposal.get("x", proposal.get("left", 0)) or 0),
@@ -2328,13 +3184,15 @@ def _post_review_proposal(
     center_y = int((unit["y"] + unit["height"] / 2) * 8)
     key = (camera_id, reason, label, center_x, center_y)
     now = time.time()
-    if now - _unfamiliar_seen.get(key, 0) < 1200:
+    if not reserved and now - _unfamiliar_seen.get(key, 0) < 1200:
         return False
+    _unfamiliar_seen[key] = now
     jpeg = encode_jpeg(frame, max_width=960, quality=70)
     if not jpeg:
+        _unfamiliar_seen.pop(key, None)
         return False
     response = client.post(
-        f"{settings.api_base}/missed-detections/unfamiliar",
+        f"{api_base()}/missed-detections/unfamiliar",
         data={
             "camera_id": camera_id,
             "label": label,
@@ -2354,6 +3212,7 @@ def _post_review_proposal(
             f"[detector] {camera_id} {reason} report "
             f"HTTP {response.status_code} {response.text[:200]}"
         )
+        _unfamiliar_seen.pop(key, None)
         return False
     _unfamiliar_seen[key] = now
     print(f"[detector] {camera_id} queued {reason} {label}")
@@ -2370,40 +3229,8 @@ def report_low_confidence_classes(
     frame,
     boxes: list[dict[str, Any]],
 ) -> None:
-    """Queue known-class YOLO boxes that scored below the live detection floor."""
-    if frame is None or not boxes:
-        return
-    try:
-        posted = 0
-        for box in boxes:
-            if posted >= 3:
-                break
-            unit = _unit_box(box)
-            if unit["width"] < 0.02 or unit["height"] < 0.02:
-                continue
-            if unit["left"] + unit["width"] > 1.000001 or unit["top"] + unit["height"] > 1.000001:
-                continue
-            label = canonical_waste_class(str(box.get("class") or "")) or str(box.get("class") or "")
-            if not label:
-                continue
-            queued = _post_review_proposal(
-                client,
-                camera_id,
-                frame,
-                {
-                    "label": label,
-                    "confidence": round(float(box.get("confidence") or 0), 4),
-                    "x": unit["left"],
-                    "y": unit["top"],
-                    "width": unit["width"],
-                    "height": unit["height"],
-                },
-                "low_confidence",
-            )
-            if queued:
-                posted += 1
-    except Exception as exc:  # noqa: BLE001
-        print(f"[detector] {camera_id} low-confidence review failed: {exc}")
+    """Do not auto-queue low-confidence classes. An admin moves them from Detections."""
+    del client, camera_id, frame, boxes
 
 
 def review_unfamiliar_frame(
@@ -2463,7 +3290,7 @@ def report_uncertain_classes(client, camera_id: str, frame, boxes: list[dict[str
             if not jpeg:
                 return
             response = client.post(
-                f"{settings.api_base}/missed-detections/unfamiliar",
+                f"{api_base()}/missed-detections/unfamiliar",
                 data={
                     "camera_id": camera_id,
                     "label": label,
@@ -2504,9 +3331,11 @@ def worker() -> None:
     if "CUDAExecutionProvider" not in providers:
         print("[detector] CUDA EP not available — using CPU inference")
     model = YOLO(str(ONNX_WEIGHTS), task="detect")
-    model_label = f"YOLOv11n ONNX · {ONNX_WEIGHTS.name}"
+    model_label = f"{onnx_model_family(ONNX_WEIGHTS)} ONNX · {ONNX_WEIGHTS.name}"
+    set_live_model(model, model_label)
     global _model_classes
     _model_classes = resolve_model_classes(model)
+    register_model_classes(_model_classes)
     print(f"[detector] dataset classes ({len(_model_classes)}): {_model_classes}")
     print(f"[detector] class_identity_remap: {bool(settings.class_identity_remap)}")
     print("[detector] live boxes require confidence 0.80–0.98")
@@ -2516,10 +3345,11 @@ def worker() -> None:
     except ValueError as exc:
         raise SystemExit(f"stream config error: {exc}") from exc
     if not configs:
-        raise SystemExit("no enabled detector streams configured")
+        print("[detector] no DETECTOR_STREAMS cameras; waiting for cameras added from the dashboard")
 
-    global _stream_configs
-    _stream_configs = configs
+    global _stream_configs, _env_stream_ids
+    _stream_configs = list(configs)
+    _env_stream_ids = {c.stream_key for c in configs}
 
     print("[detector] startup (multi-stream)")
     print(f"  model: {ONNX_WEIGHTS}")
@@ -2556,6 +3386,15 @@ def worker() -> None:
         )
         thread.start()
         threads.append(thread)
+
+    manager = Thread(
+        target=managed_camera_loop,
+        args=(model, model_label),
+        name="managed-cameras",
+        daemon=True,
+    )
+    manager.start()
+    threads.append(manager)
 
     while not _stop.is_set():
         _stop.wait(0.5)
@@ -2813,13 +3652,65 @@ def stream_mjpeg():
     )
 
 
+@app.post("/model/reload")
+def reload_model(x_detector_key: str | None = Header(default=None)):
+    """Load the ONNX file on disk into the running cameras."""
+    if (x_detector_key or "") != settings.detector_key:
+        raise HTTPException(status_code=401, detail="detector key required")
+    if not ONNX_WEIGHTS.is_file():
+        raise HTTPException(status_code=422, detail="best.onnx is missing")
+    fresh = YOLO(str(ONNX_WEIGHTS), task="detect")
+    classes = resolve_model_classes(fresh)
+    # Boxes are labelled by the model's own class order, so any order works.
+    # Classes the detector did not know yet (a model trained with a new class)
+    # are added to the known list instead of refusing the model.
+    if not classes or any(not str(name).strip() for name in classes):
+        raise HTTPException(status_code=422, detail="The new model has no class names")
+    added = register_model_classes(classes)
+    label = f"{onnx_model_family(ONNX_WEIGHTS)} ONNX · {ONNX_WEIGHTS.name}"
+    with _inference_lock:
+        set_live_model(fresh, label)
+        global _model_classes
+        _model_classes = classes
+    return {"ok": True, "model": label, "classes": classes, "new_classes": added}
+
+
+class DetectionRuntimeBody(BaseModel):
+    enabled: bool = False
+
+
+@app.post("/runtime/detection")
+def runtime_detection(body: DetectionRuntimeBody):
+    """Instant Detection on/off from the dashboard. Does not wait on Laravel."""
+    enabled = apply_detection_enabled(bool(body.enabled))
+    return {"enabled": enabled}
+
+
 @app.get("/overlay")
 def overlay(camera_id: str | None = None):
     """Boxes for one camera only. Missing stream → empty boxes (fail-closed)."""
     cam, publish = _get_stream_publish(camera_id)
     model_label = _state.get("model_label") or "YOLO"
+    cached = _DETECTION_SETTINGS_CACHE
+    if cached is not None and not cached.get("enabled", False):
+        return {
+            "camera_id": cam,
+            "boxes": [],
+            "inference_ms": None,
+            "model": model_label,
+            "error": None,
+            "frame_id": None,
+            "frame_captured_at": None,
+            "connected": bool(publish.connected) if publish is not None else False,
+            "motion": {},
+            "motion_active": False,
+            "hud_conf": float(settings.conf),
+            "detection_enabled": False,
+        }
     if publish is not None:
-        return publish.overlay_payload(cam, model_label)
+        payload = publish.overlay_payload(cam, model_label)
+        payload["detection_enabled"] = True
+        return payload
     return {
         "camera_id": cam,
         "boxes": [],

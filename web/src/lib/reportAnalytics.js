@@ -139,7 +139,7 @@ export function classCounts(list) {
   (list || []).forEach((d) => {
     const name = datasetClassOf(d);
     if (!name) return;
-    counts[name] += qty(d);
+    counts[name] = (counts[name] || 0) + qty(d);
   });
   return counts;
 }
@@ -170,19 +170,42 @@ export function rankedClasses(list, limit = 5) {
     }));
 }
 
+export function chartCategories(rows) {
+  const extras = [];
+  (rows || []).forEach((row) => {
+    Object.entries(row?.counts || {}).forEach(([name, count]) => {
+      if (!count || PARENT_CATEGORIES.includes(name) || extras.includes(name)) return;
+      extras.push(name);
+    });
+  });
+  return [...PARENT_CATEGORIES, ...extras];
+}
+
 export function categoryRows(list) {
   const totals = categoryCounts(list);
-  const classTotals = classCounts(list);
-  const grand = PARENT_CATEGORIES.reduce((s, name) => s + totals[name], 0);
-  return PARENT_CATEGORIES.map((label, index) => ({
+  const labels = [
+    ...PARENT_CATEGORIES,
+    ...Object.keys(totals).filter((name) => !PARENT_CATEGORIES.includes(name) && totals[name] > 0),
+  ];
+  const grand = labels.reduce((sum, name) => sum + (totals[name] || 0), 0);
+  const grouped = new Map(labels.map((name) => [name, new Map()]));
+  (list || []).forEach((detection) => {
+    const category = parentCategoryOf(detection);
+    const name = datasetClassOf(detection);
+    if (!category || !name || !grouped.has(category)) return;
+    const bucket = grouped.get(category);
+    bucket.set(name, (bucket.get(name) || 0) + qty(detection));
+  });
+  return labels.map((label, index) => ({
     label,
-    count: totals[label],
-    percent: grand > 0 ? Math.round((totals[label] / grand) * 100) : 0,
-    color: CATEGORY_COLORS[label] || CLASS_COLORS[index],
-    classifications: WASTE_CLASSES.filter((name) => CATEGORY_BY_CLASS[name] === label).map(
-      (name) => ({ label: name, count: classTotals[name] }),
-    ),
-  })).sort((a, b) => b.count - a.count);
+    count: totals[label] || 0,
+    percent: grand > 0 ? Math.round(((totals[label] || 0) / grand) * 100) : 0,
+    color: CATEGORY_COLORS[label] || CLASS_COLORS[index % CLASS_COLORS.length],
+    classifications: [...(grouped.get(label) || [])].map(([className, count]) => ({
+      label: className,
+      count,
+    })),
+  })).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
 }
 
 function pad2(n) {
@@ -274,6 +297,7 @@ export function bucketMonthly(list, bounds, now = new Date()) {
       const n = qty(d);
       total += n;
       if (cat && cat in counts) counts[cat] += n;
+      if (cat) counts[cat] = (counts[cat] || 0) + n;
     });
     return {
       label: month.toLocaleDateString('en-PH', { month: 'short' }),

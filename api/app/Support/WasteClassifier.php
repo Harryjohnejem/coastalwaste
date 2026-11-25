@@ -12,22 +12,28 @@ class WasteClassifier
     {
         $label = strtolower(trim($rawLabel));
 
+        $official = DatasetClasses::match($rawLabel);
+        if ($official === null) {
+            $aliases = [
+                'eco bag' => 'Ecobag',
+                'facemask' => 'Face Mask',
+                'styrofoam cup' => 'Styro Cup',
+                'paper carton' => 'Paper Drink Carton',
+                'juice carton' => 'Paper Drink Carton',
+                'cellophane' => 'Plastic Cellophane',
+                'tin can' => 'Can',
+                'metal can' => 'Can',
+            ];
+            if (isset($aliases[$label])) {
+                $official = $aliases[$label];
+            }
+        }
+        if ($official !== null) {
+            return self::officialClassification($official);
+        }
+
         $exact = [
-            'can' => 'Tin Can',
-            'cardboard' => 'Cardboard',
-            'ecobag' => 'Ecobag',
-            'eco bag' => 'Ecobag',
-            'face mask' => 'Other Plastic',
-            'glass bottle' => 'Glass Bottle',
-            'paper bag' => 'Tissue / packaging',
-            'paper drink carton' => 'Paper Carton',
             'plastic bag' => 'Plastic Bag',
-            'plastic bottle' => 'Plastic Bottle',
-            'plastic cellophane' => 'Other Plastic',
-            'plastic cup' => 'Plastic Cup',
-            'plastic wrapper' => 'Other Plastic',
-            'styro cup' => 'Styrofoam',
-            'styrofoam' => 'Styrofoam',
         ];
         if (isset($exact[$label])) {
             $found = WasteClassification::query()
@@ -96,6 +102,27 @@ class WasteClassifier
                     ],
                 );
             });
+    }
+
+    private static function officialClassification(string $name): WasteClassification
+    {
+        $existing = WasteClassification::query()->where('waste_type', $name)->first();
+        if ($existing) {
+            return $existing;
+        }
+
+        $categoryName = DatasetClasses::categoryOf($name) ?? 'Plastic';
+        $category = WasteCategory::query()->firstOrCreate(
+            ['category_name' => $categoryName],
+            ['description' => $categoryName.' coastal waste'],
+        );
+
+        return WasteClassification::query()->firstOrCreate(
+            [
+                'category_id' => $category->id,
+                'waste_type' => $name,
+            ],
+        );
     }
 
     /** Normalize confidence to 0–100 for DECIMAL(5,2) storage. */

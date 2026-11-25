@@ -10,8 +10,22 @@ use Illuminate\Support\Collection;
 /** Create one admin notification per newly saved waste detection. */
 class DetectionNotifier
 {
+    /**
+     * Settings > Notifications > "Notify on every new detection". Off by
+     * default so the bell keeps the cleanup alerts readable.
+     */
+    public static function enabled(): bool
+    {
+        $alerts = \App\Models\SystemSetting::getDefault()['alerts'] ?? [];
+
+        return is_array($alerts) && filter_var($alerts['detectionAlerts'] ?? false, FILTER_VALIDATE_BOOLEAN);
+    }
+
     public static function notifyNewDetection(Detection $detection): void
     {
+        if (! self::enabled()) {
+            return;
+        }
         $detection->loadMissing(['camera', 'classification']);
 
         $recipients = self::recipients();

@@ -15,6 +15,7 @@ class DetectionIngestTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        \App\Models\SystemSetting::saveDefault(['detection' => ['enabled' => true]]);
 
         Camera::query()->create([
             'camera_code' => 'CAM-01',
@@ -73,11 +74,11 @@ class DetectionIngestTest extends TestCase
         $this->assertDatabaseHas('detections', [
             'location' => 'Sector B',
             'quantity' => 1,
-            'status' => 'Detected',
+            'status' => 'Present',
         ]);
 
         $this->assertDatabaseHas('detection_logs', [
-            'raw_label' => 'plastic bottle',
+            'raw_label' => 'Plastic Bottle',
             'model_name' => 'yolov8s-worldv2.pt',
             'processing_time_ms' => 42,
         ]);
@@ -86,5 +87,22 @@ class DetectionIngestTest extends TestCase
             'camera_code' => 'CAM-01',
             'status' => 'Online',
         ]);
+    }
+
+    public function test_ingest_unknown_camera_is_rejected_before_logging(): void
+    {
+        $this->withHeader('X-Detector-Key', 'tidalwatch-detector-local')
+            ->postJson('/api/detections/live', [
+                'camera_id' => 'CAM-04',
+                'detections' => [[
+                    'class' => 'Plastic Bottle',
+                    'confidence' => 0.91,
+                    'subtitle' => 'Track 9 · YOLO · CAM-04',
+                ]],
+            ])
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'Camera not found.');
+
+        $this->assertSame(0, \App\Models\Detection::query()->count());
     }
 }

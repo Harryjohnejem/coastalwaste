@@ -27,6 +27,24 @@ class AuthLoginTest extends TestCase
             ->assertJsonStructure(['token', 'user' => ['id', 'name', 'email']]);
     }
 
+    public function test_login_with_username(): void
+    {
+        User::factory()->create([
+            'username' => 'admin',
+            'email' => 'operator@example.test',
+            'password' => 'secret-pass',
+            'role' => 'Admin',
+        ]);
+
+        $this->postJson('/api/login', ['username' => 'admin', 'password' => 'secret-pass'])
+            ->assertOk()->assertJsonStructure(['token']);
+        // Not case sensitive.
+        $this->postJson('/api/login', ['username' => 'Admin', 'password' => 'secret-pass'])
+            ->assertOk();
+        $this->postJson('/api/login', ['username' => 'admin', 'password' => 'wrong'])
+            ->assertStatus(422);
+    }
+
     public function test_login_rejects_wrong_password(): void
     {
         User::factory()->create([

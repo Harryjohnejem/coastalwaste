@@ -48,11 +48,14 @@ _HUD_BOX_KEYS = (
     "w",
     "h",
     "track_id",
+    # Saved Waste Detections row for this track; the dashboard log uses it.
+    "detection_id",
     "camera_id",
     "confirmed",
     "frames",
     "stage",
     "provisional",
+    "held",
     "needs_label",
     "variant",
     "severity",
@@ -346,12 +349,24 @@ class LatestFrameReader:
 
 
 def new_byte_tracker() -> Any:
-    """Fresh ByteTrack instance — never share across streams."""
+    """Fresh ByteTrack instance — never share across streams.
+
+    Buffer and match thresholds are looser than the Ultralytics default so a
+    still piece of waste keeps the same ID through occlusion and missed YOLO
+    looks, instead of a new ID that falsely looks like a cleanup.
+    """
     from ultralytics.trackers.byte_tracker import BYTETracker
     from ultralytics.utils import YAML, IterableSimpleNamespace
     from ultralytics.utils.checks import check_yaml
 
     cfg = IterableSimpleNamespace(**YAML.load(check_yaml("bytetrack.yaml")))
+    cfg.track_high_thresh = 0.25
+    cfg.track_low_thresh = 0.05
+    cfg.new_track_thresh = 0.50
+    cfg.track_buffer = 180
+    # Cost is 1 − IoU. A higher thresh keeps the same ID through missed looks.
+    cfg.match_thresh = 0.90
+    cfg.fuse_score = True
     return BYTETracker(args=cfg)
 
 

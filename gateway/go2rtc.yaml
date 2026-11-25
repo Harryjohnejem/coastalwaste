@@ -5,12 +5,12 @@ api:
 streams:
     # Tapo C545D dual lens — ${TAPO_*} and ${TAPO2_*} come from gateway/.env
     # Start with ./start.sh (not go2rtc.exe alone) or URLs stay literal ${...}
-    # First camera: cam01 = wide-angle (/stream1), cam02 = telephoto (/stream6)
-    cam01: rtsp://${TAPO_RTSP_USER}:${TAPO_RTSP_PASS}@${TAPO_HOST}:554/stream1
-    cam02: rtsp://${TAPO_RTSP_USER}:${TAPO_RTSP_PASS}@${TAPO_HOST}:554/stream6
+    # Wide lenses only. cam01 is the first Tapo, cam02 is the second.
+    # transport=tcp avoids the UDP drops that blank a Tapo picture.
+    # timeout stops a dead camera from holding the frame API open.
+    cam01: rtsp://${TAPO_RTSP_USER}:${TAPO_RTSP_PASS}@${TAPO_HOST}:554/stream1#transport=tcp#timeout=5s
     # Second camera (Paco). Own Camera Account — do not reuse TAPO_* credentials.
-    cam03: rtsp://${TAPO2_RTSP_USER}:${TAPO2_RTSP_PASS}@${TAPO2_HOST}:554/stream1
-    cam04: rtsp://${TAPO2_RTSP_USER}:${TAPO2_RTSP_PASS}@${TAPO2_HOST}:554/stream6
+    cam02: rtsp://${TAPO2_RTSP_USER}:${TAPO2_RTSP_PASS}@${TAPO2_HOST}:554/stream1#transport=tcp#timeout=5s
 
 webrtc:
     listen: ":8560"

@@ -11,6 +11,28 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Detection extends Model
 {
+    /*
+     * Waste statuses. The cameras can only say whether waste is still seen;
+     * only a person can say it was cleaned.
+     *   Detected           saved by hand            -> "Waste Detected"
+     *   Present            seen by a camera         -> "Waste Detected", then "Still Present"
+     *   No Longer Visible  left the camera view     (inferred, NOT cleaning)
+     *   Cleaning Verified  checked by an inspector / administrator (who + when stored)
+     *   Ignored            hidden
+     */
+    public const DETECTED = 'Detected';
+
+    public const PRESENT = 'Present';
+
+    public const NOT_VISIBLE = 'No Longer Visible';
+
+    public const VERIFIED = 'Cleaning Verified';
+
+    public const IGNORED = 'Ignored';
+
+    /** Seen again within this many seconds of the first save still counts as just detected. */
+    private const JUST_DETECTED_SECONDS = 60;
+
     protected $fillable = [
         'camera_id',
         'classification_id',
@@ -21,10 +43,14 @@ class Detection extends Model
         'last_seen_at',
         'removed_at',
         'removal_reason',
+        'cleaning_verified_by',
+        'cleaning_verified_at',
         'object_key',
         'status',
         'moved_to_review',
+        'auto_reviewed_at',
         'training_dataset',
+        'training_model',
         'dataset_attribution',
     ];
 
@@ -37,6 +63,8 @@ class Detection extends Model
             'last_seen_at' => 'datetime',
             'removed_at' => 'datetime',
             'moved_to_review' => 'boolean',
+            'auto_reviewed_at' => 'datetime',
+            'cleaning_verified_at' => 'datetime',
         ];
     }
 
@@ -95,6 +123,28 @@ class Detection extends Model
         return $query->where('moved_to_review', false);
     }
 
+    /** The person who verified the cleaning. */
+    public function verifier(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(User::class, 'cleaning_verified_by');
+    }
+
+    /** Status as shown everywhere (dashboard, records, analytics, reports). */
+    public function statusLabel(): string
+    {
+        return match ($this->status) {
+            self::DETECTED => 'Waste Detected',
+            self::PRESENT => ($this->last_seen_at && $this->detected_at
+                && $this->last_seen_at->diffInSeconds($this->detected_at, true) > self::JUST_DETECTED_SECONDS)
+                ? 'Still Present'
+                : 'Waste Detected',
+            self::NOT_VISIBLE => 'No Longer Visible',
+            self::VERIFIED => 'Cleaning Verified',
+            self::IGNORED => 'Ignored',
+            default => (string) $this->status,
+        };
+    }
+
     /**
      * API shape expected by the React dashboard / detector.
      */
@@ -136,14 +186,24 @@ class Detection extends Model
             'removal_reason' => $this->removal_reason,
             'object_key' => $this->object_key,
             'status' => $this->status,
+            'status_label' => $this->statusLabel(),
+            'cleaning_verified_at' => $this->cleaning_verified_at?->format('Y-m-d H:i:s'),
+            'cleaning_verified_by' => $this->cleaning_verified_by ? $this->verifier?->name : null,
             // Model training metadata (Local 1 + Local 2 merged). Null on legacy rows.
             'training_dataset' => $this->training_dataset,
-            'training_dataset_label' => $this->training_dataset
-                ?: 'Unknown / Not recorded',
+            'training_model' => $this->training_model,
+            // Live-model rows: top line is "YOLOv11l / Roboflow", second line is the Roboflow folder.
+            'training_dataset_label' => $attributionCode === DatasetAttribution::LIVE_MODEL
+                ? ($this->training_dataset ?: 'Unknown / Not recorded')
+                : ($this->training_dataset ?: 'Unknown / Not recorded'),
             // Per-detection attribution — never inferred from class/confidence alone.
             'dataset_attribution' => $attributionCode,
-            'dataset_attribution_label' => DatasetAttribution::label($attributionCode),
-            'dataset_attribution_tooltip' => DatasetAttribution::tooltip($attributionCode),
+            'dataset_attribution_label' => $attributionCode === DatasetAttribution::LIVE_MODEL
+                ? ($this->training_model ?: \App\Support\LiveModel::DEFAULT_MODEL).' / Roboflow'
+                : DatasetAttribution::label($attributionCode),
+            'dataset_attribution_tooltip' => $attributionCode === DatasetAttribution::LIVE_MODEL
+                ? 'Detected by the live model '.($this->training_model ?: 'YOLO').' trained on '.($this->training_dataset ?: 'the live dataset').'.'
+                : DatasetAttribution::tooltip($attributionCode),
             'severity' => 'alert',
             'subtitle' => $trackId ? 'Track '.$trackId : null,
             'snapshot_url' => $image

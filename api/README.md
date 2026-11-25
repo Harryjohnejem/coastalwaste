@@ -12,6 +12,14 @@ php artisan migrate --seed
 php artisan serve
 ```
 
+Training uses the database queue. While `php artisan serve` is running, also start:
+
+```bash
+php artisan queue:work --queue=default --tries=1 --timeout=600
+```
+
+Detection Reviews follows the Roboflow train flow: **Upload dataset**, lock **YOLOv11 Large** (`yolov11l`), **Pick your data** (create a version), then train for **350 epochs**. When Roboflow finishes, the API downloads the weights, checks that the class order matches the live detector, installs them as ONNX, and reloads the detector. A timestamped backup of the previous `best.onnx` is kept. The cameras keep the current weights until that check passes.
+
 Default database in `.env.example` is MySQL (`coastal_waste_monitoring_reporting_db`).
 API base URL: `http://localhost:8000/api`
 

@@ -43,13 +43,11 @@ Route key is `camera_code` (example: `CAM-01`).
 | `PUT` | `/settings` | Save settings |
 | `POST` | `/reports` | File a Summary/Detailed report |
 
-## Quotas, notifications, catalog
+## Cleanup threshold, notifications, catalog
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/quotas` | List waste quotas |
-| `POST` | `/quotas` | Create |
-| `PUT` | `/quotas/{id}` | Update |
+| `GET` | `/waste-load` | Cleanup threshold per camera: count, percent, level (normal / warning / full); sends any level-change alert that is due |
 | `GET` | `/notifications` | Current user’s alerts |
 | `POST` | `/notifications/read-all` | Mark all read |
 | `POST` | `/notifications/{id}/read` | Mark one read |

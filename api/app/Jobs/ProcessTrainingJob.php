@@ -2,13 +2,11 @@
 
 namespace App\Jobs;
 
-use App\Models\MissedDetectionReport;
 use App\Models\TrainingJob;
 use App\Services\RoboflowClient;
 use App\Support\ReviewDataset;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Support\Facades\DB;
 use Throwable;
 
 class ProcessTrainingJob implements ShouldQueue
@@ -27,7 +25,7 @@ class ProcessTrainingJob implements ShouldQueue
         if (! $job) {
             return;
         }
-        if (! in_array($job->status, [TrainingJob::PREPARING, TrainingJob::UPLOADING, TrainingJob::CREATING_VERSION, TrainingJob::FAILED], true)) {
+        if (! in_array($job->status, [TrainingJob::PREPARING, TrainingJob::UPLOADING, TrainingJob::FAILED], true)) {
             return;
         }
 
@@ -40,8 +38,8 @@ class ProcessTrainingJob implements ShouldQueue
                 'status' => TrainingJob::UPLOADING,
                 'workspace' => $roboflow->workspace(),
                 'project' => $roboflow->project(),
-                'model_type' => $roboflow->modelType(),
-                'training_speed' => $roboflow->speed(),
+                'model_type' => TrainingJob::RECIPE['model_type'],
+                'training_speed' => TrainingJob::RECIPE['training_speed'],
                 'preprocessing' => $roboflow->preprocessing(),
                 'augmentation' => $roboflow->augmentation(),
                 'error_message' => null,
@@ -49,30 +47,7 @@ class ProcessTrainingJob implements ShouldQueue
 
             $this->uploadPending($job, $roboflow);
 
-            $job->update(['status' => TrainingJob::CREATING_VERSION]);
-            $version = $job->dataset_version ?: $roboflow->generateVersion();
-            $hosted = $roboflow->project().'/'.$version;
-            $job->update([
-                'dataset_version' => $version,
-                'hosted_model_id' => $hosted,
-                'status' => TrainingJob::TRAINING,
-            ]);
-
-            $manifest = is_array($job->manifest) ? $job->manifest : [];
-            if (empty($manifest['training_started'])) {
-                $roboflow->startTraining($version);
-                $manifest['training_started'] = true;
-                $job->update(['manifest' => $manifest]);
-            }
-
-            DB::transaction(function () use ($job) {
-                MissedDetectionReport::query()
-                    ->where('training_job_id', $job->id)
-                    ->update([
-                        'status' => MissedDetectionReport::EXPORTED,
-                        'updated_at' => now(),
-                    ]);
-            });
+            $job->update(['status' => TrainingJob::READY_TO_PICK]);
         } catch (Throwable $e) {
             $job->update([
                 'status' => TrainingJob::FAILED,
@@ -102,6 +77,7 @@ class ProcessTrainingJob implements ShouldQueue
             if (! $row) {
                 $item->update([
                     'upload_status' => 'failed',
+                    'validation_status' => 'invalid',
                     'upload_error' => 'The review image or annotation is no longer valid.',
                 ]);
                 throw new \RuntimeException("Review {$item->report_id} failed validation during upload.");
@@ -109,10 +85,12 @@ class ProcessTrainingJob implements ShouldQueue
 
             $item->update(['upload_status' => 'uploading', 'upload_error' => null]);
             $uploaded = $roboflow->uploadImage($row['filename'], $row['bytes'], $row['mime'], $item->split ?: $row['split']);
-            $roboflow->saveAnnotation($uploaded['id'], $row['filename'], $row['yolo'], $labelmap);
+            $labelName = pathinfo($row['filename'], PATHINFO_FILENAME).'.txt';
+            $roboflow->saveAnnotation($uploaded['id'], $labelName, $row['yolo'], $labelmap);
             $item->update([
                 'roboflow_image_id' => $uploaded['id'],
                 'upload_status' => 'uploaded',
+                'validation_status' => 'valid',
                 'image_hash' => $row['hash'],
             ]);
         }

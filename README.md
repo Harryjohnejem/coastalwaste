@@ -1,6 +1,6 @@
 # Computer Vision-Based Coastal Waste Monitoring and Reporting System
 
-Barangay operators at Paco Beach (Barangay Gracia) watch Tapo cameras, review YOLO waste detections, set cleanup quotas, and file reports.
+Barangay operators at Paco Beach (Barangay Gracia) watch Tapo cameras, review YOLO waste detections, get cleanup alerts when a camera's waste reaches the cleanup threshold, and file reports.
 
 This is a **four-service web system** (not mobile or desktop). Folder names follow the services and frameworks we actually run.
 
@@ -27,7 +27,7 @@ Tapo RTSP  →  gateway (go2rtc)  →  web (live view)
 | Folder | Role | Port |
 |--------|------|------|
 | `gateway/` | Restream Tapo RTSP for the browser and detector | `1990` |
-| `api/` | Auth, cameras, detections, stats, quotas, reports | `8000` |
+| `api/` | Auth, cameras, detections, stats, cleanup threshold, reports | `8000` |
 | `detector/` | Classify waste on JPEG frames; post boxes to Laravel | `8092` |
 | `web/` | Operator UI — live, detections, cameras, reports | `5173` |
 
@@ -74,6 +74,8 @@ cp .env.example .env
 php artisan key:generate
 php artisan migrate --seed
 php artisan serve
+# Upload jobs and Roboflow train-watch (database queue). Keep this running.
+php artisan queue:work --queue=default --tries=1 --timeout=600
 
 # 3. Detector
 cd detector

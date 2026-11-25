@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
-import { POLL_INTERVAL_MS } from '../../constants';
+import { useEffect, useRef, useState } from 'react';
 import usePageVisible from '../../hooks/usePageVisible';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 import { useCameraStore } from '../../stores/useCameraStore';
 import { listDetections } from '../../api/detections';
 import { classifyWaste } from '../../lib/wasteFilters';
+import { camerasInGrid } from '../../lib/gridCameras';
 
 /** Map detection → icon kind for accurate waste-type glyphs. */
 function iconKindFor(det) {
@@ -34,8 +34,9 @@ function iconKindFor(det) {
 }
 
 function statusLabel(status) {
-  if (status === 'Present') return 'Active';
-  if (status === 'Confirmed Cleaned') return 'Confirmed Clean';
+  if (status === 'Present') return 'Still Present';
+  if (status === 'Detected') return 'Waste Detected';
+  if (status === 'Confirmed Cleaned') return 'No Longer Visible';
   return status || '';
 }
 
@@ -176,26 +177,6 @@ function WasteIcon({ kind }) {
   }
 }
 
-function trackIdOf(row) {
-  const match = String(row?.subtitle || '').match(/Track\s+(\d+)/i);
-  return match ? match[1] : null;
-}
-
-/** One visible row per tracking ID. Live rows come first and win over the saved copy. */
-function dedupeByTrack(items) {
-  const seen = new Set();
-  const kept = [];
-  for (const row of items) {
-    const trackId = trackIdOf(row);
-    if (trackId) {
-      if (seen.has(trackId)) continue;
-      seen.add(trackId);
-    }
-    kept.push(row);
-  }
-  return kept;
-}
-
 function formatWhen(value) {
   if (!value) return 'none';
   const dt = new Date(String(value).replace(' ', 'T'));
@@ -255,43 +236,47 @@ function visibleLiveBoxes(boxes, meta, cameraId, minConf) {
     (meta?.overlayPublishedAt != null
       ? Math.max(0, Math.round((Date.now() / 1000 - meta.overlayPublishedAt) * 1000))
       : null);
-  const staleMs = Math.max(25000, (detectPublishMs || 0) * 4 + 4000);
+  const staleMs = Math.max(5000, (detectPublishMs || 0) * 4 + 4000);
   if (overlayAgeMs != null && overlayAgeMs > staleMs) return [];
   return (boxes || []).filter((box) => {
     if (box?.needs_label) return false;
     const boxCam = String(box.camera_id || meta?.cameraId || '').toUpperCase();
     if (boxCam && id && boxCam !== id) return false;
+    if (box.track_id != null || box.held === true) return true;
+    if (box.provisional === true) return false;
     return score01(box.confidence) >= floor;
   });
 }
 
-function rowsFromLiveBoxes(boxes, presentRows, cameraId) {
-  const byTrack = new Map();
-  presentRows.forEach((row) => {
-    const trackId = trackIdOf(row);
-    if (trackId) byTrack.set(String(trackId), row);
-  });
-  return boxes.map((box, index) => {
+/**
+ * Log rows = the camera's Present rows in Waste Detections (saved at 80%+),
+ * plus a box the detector saved moments ago that the next refresh will list.
+ * Boxes still tracking (no saved record, under 80%) are never logged, and a
+ * row leaves only when Waste Detections marks it No Longer Visible, so the
+ * log and the table always show the same records.
+ */
+function rowsFromLiveBoxes(boxes, presentRows, cameraId, knownMaxId) {
+  const rows = presentRows.map((row) => ({ ...row, status: 'Present' }));
+  const seen = new Set(rows.map((row) => Number(row.id)));
+  boxes.forEach((box) => {
+    const id = Number(box?.detection_id);
+    if (!Number.isInteger(id) || id <= 0 || seen.has(id)) return;
+    // Not in the Present list: either saved after the last refresh, or
+    // already No Longer Visible. Only a new save is shown.
+    if (id <= knownMaxId) return;
+    seen.add(id);
     const track = box.track_id != null ? String(box.track_id) : null;
-    const saved = track ? byTrack.get(track) : null;
-    if (saved) {
-      return {
-        ...saved,
-        class: box.class || saved.class,
-        confidence: box.confidence ?? saved.confidence,
-        status: 'Present',
-      };
-    }
-    return {
-      id: `live-${cameraId}-${track || index}`,
+    rows.push({
+      id,
       class: box.class || 'Waste',
       confidence: box.confidence,
       camera_id: cameraId,
       status: 'Present',
-      subtitle: [track ? `Track ${track}` : null, cameraId].filter(Boolean).join(' · '),
+      subtitle: track ? `Track ${track}` : null,
       detected_at: new Date().toISOString(),
-    };
+    });
   });
+  return rows.sort((a, b) => Number(b.id) - Number(a.id));
 }
 
 export default function DetectionLog() {
@@ -302,30 +287,43 @@ export default function DetectionLog() {
   const statsError = useSettingsStore((s) => s.statsError);
   const hudConf = useSettingsStore((s) => s.settings?.detection?.confidence ?? 0.8);
   const activeCameraId = useCameraStore((s) => s.activeCameraId);
+  const cameras = useCameraStore((s) => s.cameras);
+  const gridView = useCameraStore((s) => s.gridView);
   const overlayMeta = useCameraStore((s) => s.overlayMeta);
   const overlayBoxes = useCameraStore((s) => s.overlayBoxes);
   const overlayKnown = useCameraStore((s) => s.overlayKnown);
+  const overlaysByCamera = useCameraStore((s) => s.overlaysByCamera);
   const detectionOn = useCameraStore((s) => s.detectionOn);
+  const streamStatus = useCameraStore((s) => s.streamStatus);
   const [savedPresent, setSavedPresent] = useState([]);
   const [liveLoading, setLiveLoading] = useState(false);
+  const reloadPresentRef = useRef(() => {});
+  const gridIds = camerasInGrid(cameras).map((camera) => String(camera.id));
+  const watchCameras = gridView ? gridIds : (activeCameraId ? [String(activeCameraId)] : []);
 
   useEffect(() => {
-    if (!detectionOn || !activeCameraId) {
+    if (!detectionOn || watchCameras.length === 0) {
       setSavedPresent([]);
       setLiveLoading(false);
       return undefined;
     }
     let cancelled = false;
     let running = false;
+    const allowed = new Set(watchCameras.map((id) => id.toUpperCase()));
     const loadPresent = ({ silent } = {}) => {
       if (running) return Promise.resolve();
       running = true;
       if (!silent) setLiveLoading(true);
-      return listDetections(50, { camera_id: activeCameraId, status: 'Present' })
+      const params = gridView
+        ? { status: 'Present' }
+        : { camera_id: watchCameras[0], status: 'Present' };
+      return listDetections(gridView ? 100 : 50, params)
         .then((list) => {
           if (cancelled) return;
           const rows = Array.isArray(list) ? list : list?.data ?? [];
-          setSavedPresent(rows.filter((row) => row?.status === 'Present' && row?.camera_id === activeCameraId));
+          setSavedPresent(rows.filter((row) => (
+            row?.status === 'Present' && allowed.has(String(row?.camera_id || '').toUpperCase())
+          )));
         })
         .catch(() => {
           if (!cancelled) setSavedPresent([]);
@@ -335,38 +333,84 @@ export default function DetectionLog() {
           if (!cancelled) setLiveLoading(false);
         });
     };
+    reloadPresentRef.current = () => loadPresent({ silent: true });
     loadPresent();
     const timer = pageVisible
       ? setInterval(() => {
         loadPresent({ silent: true });
-      }, POLL_INTERVAL_MS)
+      }, 2000)
       : null;
     return () => {
       cancelled = true;
+      reloadPresentRef.current = () => {};
       if (timer) clearInterval(timer);
     };
-  }, [activeCameraId, detectionOn, pageVisible]);
+  }, [watchCameras.join('|'), detectionOn, pageVisible, gridView]);
+
+  // A box the detector just saved (80%+) is not in the Present list yet:
+  // refresh now so the log and Waste Detections pick it up together.
+  const knownMaxIdForReload = savedPresent.reduce((max, row) => Math.max(max, Number(row?.id) || 0), 0);
+  const liveSavedIds = (gridView
+    ? Object.values(overlaysByCamera || {}).flatMap((overlay) => overlay?.boxes || [])
+    : overlayBoxes || []
+  ).map((box) => Number(box?.detection_id)).filter((id) => Number.isInteger(id) && id > 0);
+  const newestLiveSavedId = liveSavedIds.length ? Math.max(...liveSavedIds) : 0;
+  useEffect(() => {
+    if (newestLiveSavedId > knownMaxIdForReload) reloadPresentRef.current();
+  }, [newestLiveSavedId, knownMaxIdForReload]);
 
   const cameraLive = overlayMeta?.cameraId
     ? String(overlayMeta.cameraId).toUpperCase() === String(activeCameraId || '').toUpperCase()
     : false;
-  const cameraDisconnected = cameraLive && overlayMeta?.connected === false;
-  const liveBoxes = visibleLiveBoxes(
-    overlayBoxes,
-    overlayMeta,
-    activeCameraId,
-    overlayMeta?.hudConf ?? hudConf,
+  const cameraDisconnected = !gridView && (
+    streamStatus !== 'LIVE' || (cameraLive && overlayMeta?.connected === false)
   );
-  const presentRows = dedupeByTrack(savedPresent.filter((row) => Number.isInteger(row?.id)));
+  const presentByCamera = (cameraId) => savedPresent.filter((row) => (
+    Number.isInteger(Number(row?.id))
+    && String(row.camera_id || '').toUpperCase() === String(cameraId).toUpperCase()
+  ));
+  const knownMaxId = savedPresent.reduce((max, row) => Math.max(max, Number(row?.id) || 0), 0);
   let rows = [];
-  if (detectionOn && activeCameraId && !cameraDisconnected) {
-    rows = overlayKnown
-      ? rowsFromLiveBoxes(liveBoxes, presentRows, activeCameraId)
-      : presentRows;
+  if (detectionOn && watchCameras.length && !cameraDisconnected) {
+    if (gridView) {
+      watchCameras.forEach((cameraId) => {
+        const overlay = overlaysByCamera[cameraId] || overlaysByCamera[String(cameraId).toUpperCase()];
+        if (!overlay || overlay.meta?.connected !== true) return;
+        const boxes = visibleLiveBoxes(
+          overlay?.boxes,
+          overlay?.meta,
+          cameraId,
+          overlay?.meta?.hudConf ?? hudConf,
+        );
+        const presentRows = presentByCamera(cameraId);
+        rows = rows.concat(rowsFromLiveBoxes(boxes, presentRows, cameraId, knownMaxId));
+      });
+      // One record is one row.
+      const seenIds = new Set();
+      rows = rows.filter((row) => {
+        const id = Number(row.id);
+        if (seenIds.has(id)) return false;
+        seenIds.add(id);
+        return true;
+      });
+    } else {
+      const liveBoxes = visibleLiveBoxes(
+        overlayBoxes,
+        overlayMeta,
+        activeCameraId,
+        overlayMeta?.hudConf ?? hudConf,
+      );
+      const presentRows = presentByCamera(activeCameraId);
+      rows = overlayKnown && streamStatus === 'LIVE'
+        ? rowsFromLiveBoxes(liveBoxes, presentRows, activeCameraId, knownMaxId)
+        : [];
+    }
   }
   const snapshot = logSnapshot(rows);
   const presentCount = rows.length;
-  const areaText = !activeCameraId
+  const camsWithWaste = [...new Set(rows.map((row) => row.camera_id).filter(Boolean))];
+  const viewLabel = gridView ? (gridIds.join(' and ') || 'the grid') : activeCameraId;
+  const areaText = watchCameras.length === 0
     ? 'Select a camera to see its live detections.'
     : !detectionOn
       ? `Detection is off. The live log is paused. Saved records stay in Waste Detections${
@@ -375,26 +419,25 @@ export default function DetectionLog() {
       : cameraDisconnected
         ? `${activeCameraId} is not updating. Live tracking cannot mark the scene clean until the stream is back.`
         : presentCount > 0
-          ? `Waste is in view on ${activeCameraId}.`
-          : liveLoading && !overlayKnown
+          ? (gridView
+            ? `Waste is in view on ${camsWithWaste.join(' and ') || viewLabel}.`
+            : `Waste is in view on ${activeCameraId}.`)
+          : liveLoading && !(gridView ? watchCameras.some((id) => overlaysByCamera[id]) : overlayKnown)
             ? 'Loading live detections…'
-            : `No waste currently in view on ${activeCameraId}.`;
+            : `No waste currently in view on ${viewLabel}.`;
   const areaHint = !detectionOn
-    ? 'Turn detection on to see waste here as it appears. When an object leaves the camera, it is marked Confirmed Clean and leaves this log. Historical records stay in Waste Detections.'
-    : 'When an object leaves the camera, it is marked Confirmed Clean and leaves this live log. That is inferred disappearance, not verified physical cleaning.';
+    ? 'Turn detection on to see waste here as it appears. When an object leaves the camera, it is marked No Longer Visible (not verified as cleaned) and leaves this log. Historical records stay in Waste Detections.'
+    : 'A detection stays here while it is still in the camera frame. When it leaves the view it is marked No Longer Visible in Waste Detections. That is inferred from the camera; only an inspector or administrator can mark Cleaning Verified.';
   const emptyText = !detectionOn
     ? 'Detection is off. No live detections will appear until you turn detection on.'
     : cameraDisconnected
       ? 'Live tracking is paused. Historical records stay on Waste Detections.'
-      : `No waste currently in view on ${activeCameraId || 'this camera'}.`;
+      : `No waste currently in view on ${viewLabel || 'this camera'}.`;
 
   return (
     <section className="panel" style={{ flex: 1.4, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      <div className="panel-head">
+      <div className="panel-head log-panel-head">
         <span className="panel-title">Detection log</span>
-        <button className="mini-link" type="button">
-          Export CSV
-        </button>
       </div>
       <div className="log-metrics" aria-label="Detection summary">
         <div className="log-metric">
@@ -406,19 +449,19 @@ export default function DetectionLog() {
           <strong>{statsReady ? Number(stats?.detections ?? 0).toLocaleString('en-US') : '—'}</strong>
         </div>
         <div className="log-metric is-present">
-          <span>Active</span>
-          <strong>{activeCameraId ? presentCount.toLocaleString('en-US') : '—'}</strong>
+          <span>Still Present</span>
+          <strong>{watchCameras.length ? presentCount.toLocaleString('en-US') : '—'}</strong>
         </div>
         <div className="log-metric is-clean">
-          <span>Confirmed Clean</span>
-          <strong>{statsReady ? Number(stats?.confirmed_cleaned ?? 0).toLocaleString('en-US') : '—'}</strong>
+          <span title="Left the camera view (inferred, not verified cleaning)">No Longer Visible</span>
+          <strong>{statsReady ? Number(stats?.no_longer_visible ?? 0).toLocaleString('en-US') : '—'}</strong>
         </div>
       </div>
       <div className={`log-clear${!detectionOn ? ' is-paused' : ''}`}>
-        <strong>{statsError || areaText}</strong>
+        <strong>{areaText}</strong>
         <span>
           {areaHint}
-          {' '}Inferred removals today: {statsReady ? Number(stats?.confirmed_cleaned_today ?? 0) : '—'}.
+          {' '}No longer visible today: {statsReady ? Number(stats?.no_longer_visible_today ?? 0) : '—'} · Cleaning verified today: {statsReady ? Number(stats?.cleaning_verified_today ?? 0) : '—'}.
         </span>
       </div>
       <div className="log-extra">
@@ -453,8 +496,10 @@ export default function DetectionLog() {
           const className = subtype || d.class || d.title || 'Waste';
           const kind = iconKindFor(d);
           const sev = severityClass(d.severity);
-          const conf =
-            d.confidence != null ? Number(d.confidence).toFixed(2) : '—';
+          const rawConf = Number(d.confidence);
+          const conf = Number.isFinite(rawConf)
+            ? `${Math.round(rawConf > 1.5 ? rawConf : rawConf * 100)}%`
+            : '—';
           const camSrc = d.detection_source || d.camera_id;
           const sub =
             d.subtitle ||
@@ -480,7 +525,7 @@ export default function DetectionLog() {
                   <br />
                   {sub}
                   {d.status ? ` · ${statusLabel(d.status)}` : ''}
-                  {d.status === 'Confirmed Cleaned' && d.removed_at ? ` · ${formatWhen(d.removed_at)}` : ''}
+                  {(d.status === 'No Longer Visible' || d.status === 'Cleaning Verified') && d.removed_at ? ` · ${formatWhen(d.removed_at)}` : ''}
                   <br />
                   <span title={attrTip}>
                     Detection source: {camSrc || '—'} · Dataset: {attrLabel}

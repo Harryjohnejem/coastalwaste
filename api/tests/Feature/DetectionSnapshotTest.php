@@ -6,6 +6,8 @@ use App\Models\Camera;
 use App\Models\Detection;
 use App\Models\DetectionImage;
 use App\Models\DetectionLog;
+use App\Models\MissedDetectionAnnotation;
+use App\Models\MissedDetectionReport;
 use App\Models\User;
 use App\Models\WasteCategory;
 use App\Models\WasteClassification;
@@ -16,6 +18,12 @@ use Tests\TestCase;
 class DetectionSnapshotTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        \App\Models\SystemSetting::saveDefault(['detection' => ['enabled' => true]]);
+    }
 
     private function camera(): Camera
     {
@@ -37,7 +45,7 @@ class DetectionSnapshotTest extends TestCase
         ]);
     }
 
-    public function test_detection_list_returns_present_and_confirmed_cleaned_rows(): void
+    public function test_detection_list_returns_present_and_no_longer_visible_rows(): void
     {
         $camera = $this->camera();
         $classification = $this->classification();
@@ -58,14 +66,14 @@ class DetectionSnapshotTest extends TestCase
             'quantity' => 1,
             'location' => 'Paco Beach',
             'detected_at' => now()->subMinute(),
-            'status' => 'Confirmed Cleaned',
+            'status' => 'No Longer Visible',
         ]);
 
         $this->actingAs($admin)
             ->getJson('/api/detections')
             ->assertOk()
             ->assertJsonFragment(['id' => $present->id, 'status' => 'Present'])
-            ->assertJsonFragment(['id' => $cleaned->id, 'status' => 'Confirmed Cleaned']);
+            ->assertJsonFragment(['id' => $cleaned->id, 'status' => 'No Longer Visible']);
     }
 
     public function test_live_query_returns_only_the_selected_cameras_present_rows(): void
@@ -104,7 +112,7 @@ class DetectionSnapshotTest extends TestCase
             'quantity' => 1,
             'location' => 'Paco Beach',
             'detected_at' => now()->subMinute(),
-            'status' => 'Confirmed Cleaned',
+            'status' => 'No Longer Visible',
         ]);
 
         $response = $this->actingAs($admin)
@@ -185,7 +193,7 @@ class DetectionSnapshotTest extends TestCase
                 return false;
             }
         };
-        Storage::shouldReceive('disk')->once()->with('public')->andReturn($disk);
+        Storage::shouldReceive('disk')->twice()->with('public')->andReturn($disk);
         $jpeg = base64_encode((string) file_get_contents(base_path('tests/fixtures/pixel.jpg')));
 
         $this->withHeader('X-Detector-Key', 'tidalwatch-detector-local')
@@ -206,5 +214,240 @@ class DetectionSnapshotTest extends TestCase
         $this->assertSame(1, Detection::query()->count());
         $this->assertSame(0, DetectionImage::query()->count());
         $this->assertNull(Detection::query()->first()->toApiArray()['snapshot_url']);
+    }
+
+    public function test_per_class_limit_keeps_the_newest_hits_of_each_class(): void
+    {
+        $camera = $this->camera();
+        $bottle = $this->classification('Plastic Bottle');
+        $can = $this->classification('Can');
+        $admin = User::factory()->create(['role' => 'Admin']);
+        $store = function (WasteClassification $class, int $minutesAgo) use ($camera): Detection {
+            return Detection::query()->create([
+                'camera_id' => $camera->id,
+                'classification_id' => $class->id,
+                'confidence' => 80,
+                'quantity' => 1,
+                'location' => 'Paco Beach',
+                'detected_at' => now()->subMinutes($minutesAgo),
+                'status' => 'Present',
+            ]);
+        };
+        $oldBottle = $store($bottle, 30);
+        $midBottle = $store($bottle, 10);
+        $newBottle = $store($bottle, 1);
+        $oldCan = $store($can, 25);
+        $midCan = $store($can, 12);
+        $newCan = $store($can, 2);
+
+        $ids = collect($this->actingAs($admin)
+            ->getJson('/api/detections?per_class=1&limit=2')
+            ->assertOk()
+            ->json())
+            ->pluck('id')
+            ->all();
+
+        sort($ids);
+        $expected = [$midBottle->id, $newBottle->id, $midCan->id, $newCan->id];
+        sort($expected);
+        $this->assertSame($expected, $ids);
+        $this->assertNotContains($oldBottle->id, $ids);
+        $this->assertNotContains($oldCan->id, $ids);
+    }
+
+    public function test_review_list_caps_the_newest_hits_of_each_class(): void
+    {
+        $admin = User::factory()->create(['role' => 'Admin']);
+        $make = function (string $class) use ($admin): MissedDetectionReport {
+            $report = MissedDetectionReport::query()->create([
+                'user_id' => $admin->id,
+                'description' => $class,
+                'image_path' => 'missed/test.jpg',
+                'image_name' => 'test.jpg',
+                'status' => 'pending',
+                'proposal_label' => $class,
+            ]);
+            MissedDetectionAnnotation::query()->create([
+                'report_id' => $report->id,
+                'class_name' => $class,
+                'class_index' => 0,
+                'x' => 0.5,
+                'y' => 0.5,
+                'width' => 0.2,
+                'height' => 0.2,
+            ]);
+
+            return $report;
+        };
+        $oldBottle = $make('Plastic Bottle');
+        $midBottle = $make('Plastic Bottle');
+        $newBottle = $make('Plastic Bottle');
+        MissedDetectionAnnotation::query()->create([
+            'report_id' => $newBottle->id,
+            'class_name' => 'Plastic Bottle',
+            'class_index' => 0,
+            'x' => 0.2,
+            'y' => 0.2,
+            'width' => 0.2,
+            'height' => 0.2,
+        ]);
+        $oldCan = $make('Can');
+        $newCan = $make('Can');
+
+        $ids = collect($this->actingAs($admin)
+            ->getJson('/api/missed-detections?per_class=1&per_page=2')
+            ->assertOk()
+            ->json('data'))
+            ->pluck('id')
+            ->all();
+
+        sort($ids);
+        $expected = [$midBottle->id, $newBottle->id, $oldCan->id, $newCan->id];
+        sort($expected);
+        $this->assertSame($expected, $ids);
+        $this->assertNotContains($oldBottle->id, $ids);
+
+        $pageOne = $this->actingAs($admin)
+            ->getJson('/api/missed-detections?per_class=1&per_page=2&page_size=3&page=1')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 4)
+            ->assertJsonPath('meta.per_page', 3)
+            ->assertJsonPath('meta.last_page', 2)
+            ->assertJsonCount(3, 'data')
+            ->json('data');
+        $pageTwo = $this->actingAs($admin)
+            ->getJson('/api/missed-detections?per_class=1&per_page=2&page_size=3&page=2')
+            ->assertOk()
+            ->assertJsonPath('meta.page', 2)
+            ->assertJsonCount(1, 'data')
+            ->json('data');
+        $paged = collect([...$pageOne, ...$pageTwo])->pluck('id')->sort()->values()->all();
+        $this->assertSame($expected, $paged);
+
+        $newBottle->update(['status' => 'approved']);
+        $counts = collect($this->actingAs($admin)
+            ->getJson('/api/missed-detections?class_counts=1&per_class=1&per_page=2')
+            ->assertOk()
+            ->json('classes'))
+            ->pluck('count', 'name');
+        $this->assertSame(2, (int) $counts['Plastic Bottle']);
+        $this->assertSame(2, (int) $counts['Can']);
+
+        $approved = collect($this->actingAs($admin)
+            ->getJson('/api/missed-detections?class_counts=1&per_class=1&per_page=2&status=approved')
+            ->assertOk()
+            ->json('classes'))
+            ->pluck('count', 'name');
+        $this->assertSame(1, (int) $approved['Plastic Bottle']);
+        $this->assertFalse($approved->has('Can'));
+    }
+
+    public function test_eighty_percent_and_up_is_not_copied_to_reviews(): void
+    {
+        Storage::fake('public');
+        User::factory()->create(['role' => 'Admin']);
+        $this->camera();
+        $this->classification();
+        $jpeg = base64_encode((string) file_get_contents(base_path('tests/fixtures/pixel.jpg')));
+
+        $this->withHeader('X-Detector-Key', 'tidalwatch-detector-local')
+            ->postJson('/api/detections/live', [
+                'camera_id' => 'CAM-01',
+                'tracker_session' => 'session-auto',
+                'detections' => [[
+                    'class' => 'Plastic Bottle',
+                    'confidence' => 0.86,
+                    'subtitle' => 'Track 7 · YOLO · CAM-01',
+                    'left' => 10, 'top' => 20, 'width' => 15, 'height' => 25,
+                    'snapshot' => $jpeg,
+                    'review_snapshot' => $jpeg,
+                ]],
+            ])
+            ->assertOk()
+            ->assertJsonPath('logged', 1);
+
+        $this->assertSame(1, Detection::query()->count(), '80%+ is saved in Waste Detections.');
+        $this->assertSame(0, MissedDetectionReport::query()->count(), 'Detection Reviews gets 60-79% only.');
+    }
+
+    public function test_below_eighty_percent_goes_to_reviews_only(): void
+    {
+        Storage::fake('public');
+        User::factory()->create(['role' => 'Admin']);
+        $this->camera();
+        $this->classification();
+        $jpeg = base64_encode((string) file_get_contents(base_path('tests/fixtures/pixel.jpg')));
+
+        $this->withHeader('X-Detector-Key', 'tidalwatch-detector-local')
+            ->postJson('/api/detections/live', [
+                'camera_id' => 'CAM-01',
+                'tracker_session' => 'session-low',
+                'detections' => [[
+                    'class' => 'Plastic Bottle',
+                    'confidence' => 0.72,
+                    'subtitle' => 'Track 9 · YOLO · CAM-01',
+                    'left' => 10, 'top' => 20, 'width' => 15, 'height' => 25,
+                    'review_only' => true,
+                    'review_snapshot' => $jpeg,
+                ]],
+            ])
+            ->assertOk()
+            ->assertJsonPath('logged', 0)
+            ->assertJsonPath('reviews.0.subtitle', 'Track 9');
+
+        $this->assertSame(0, Detection::query()->count(), 'Below 80% is not saved in Waste Detections.');
+        $review = MissedDetectionReport::query()->firstOrFail();
+        $this->assertNull($review->source_detection_id);
+        $this->assertSame('pending', $review->status);
+        $this->assertSame(1, $review->annotations()->count());
+        Storage::disk('public')->assertExists($review->image_path);
+    }
+
+    public function test_below_sixty_percent_is_not_saved_for_review(): void
+    {
+        Storage::fake('public');
+        User::factory()->create(['role' => 'Admin']);
+        $this->camera();
+        $this->classification();
+        $jpeg = base64_encode((string) file_get_contents(base_path('tests/fixtures/pixel.jpg')));
+
+        $this->withHeader('X-Detector-Key', 'tidalwatch-detector-local')
+            ->postJson('/api/detections/live', [
+                'camera_id' => 'CAM-01',
+                'detections' => [[
+                    'class' => 'Plastic Bottle',
+                    'confidence' => 0.55,
+                    'left' => 10, 'top' => 20, 'width' => 15, 'height' => 25,
+                    'review_only' => true,
+                    'review_snapshot' => $jpeg,
+                ]],
+            ])
+            ->assertOk()
+            ->assertJsonPath('logged', 0)
+            ->assertJsonCount(0, 'reviews');
+
+        $this->assertSame(0, MissedDetectionReport::query()->count(), 'Default review range is 60-79%.');
+        $this->assertSame(0, Detection::query()->count());
+    }
+
+    public function test_server_keeps_low_confidence_out_of_waste_detections(): void
+    {
+        Storage::fake('public');
+        User::factory()->create(['role' => 'Admin']);
+        $this->camera();
+        $this->classification();
+
+        $this->withHeader('X-Detector-Key', 'tidalwatch-detector-local')
+            ->postJson('/api/detections/live', [
+                'camera_id' => 'CAM-01',
+                'detections' => [[
+                    'class' => 'Plastic Bottle',
+                    'confidence' => 0.79,
+                    'subtitle' => 'Track 3 · YOLO · CAM-01',
+                ]],
+            ])
+            ->assertOk();
+
+        $this->assertSame(0, Detection::query()->count());
     }
 }

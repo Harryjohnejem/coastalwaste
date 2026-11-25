@@ -25,12 +25,19 @@ class RoboflowClient
 
     public function modelType(): string
     {
-        return trim((string) config('services.roboflow.model_type', 'yolov11')) ?: 'yolov11';
+        return trim((string) config('services.roboflow.model_type', 'yolov11l')) ?: 'yolov11l';
     }
 
     public function speed(): string
     {
         return trim((string) config('services.roboflow.speed', 'fast')) ?: 'fast';
+    }
+
+    public function epochs(): int
+    {
+        $epochs = (int) config('services.roboflow.epochs', 350);
+
+        return $epochs > 0 ? $epochs : 350;
     }
 
     /**
@@ -64,7 +71,7 @@ class RoboflowClient
         $url = $this->apiUrl('/dataset/'.$this->project().'/upload', [
             'batch' => 'coastal-hitl',
         ]);
-        $response = Http::timeout(120)
+        $response = $this->http()->timeout(120)
             ->retry(2, 800)
             ->attach('file', $bytes, $filename, ['Content-Type' => $mime])
             ->post($url, [
@@ -95,7 +102,7 @@ class RoboflowClient
             'name' => $filename,
             'overwrite' => 'true',
         ]);
-        $response = Http::timeout(60)
+        $response = $this->http()->timeout(60)
             ->retry(2, 800)
             ->asJson()
             ->post($url, [
@@ -114,7 +121,7 @@ class RoboflowClient
     public function generateVersion(): int
     {
         $url = $this->apiUrl('/'.$this->workspace().'/'.$this->project().'/generate');
-        $response = Http::timeout(120)
+        $response = $this->http()->timeout(120)
             ->asJson()
             ->post($url, [
                 'preprocessing' => $this->preprocessing(),
@@ -129,20 +136,70 @@ class RoboflowClient
         return (int) $version;
     }
 
-    public function startTraining(int $version): void
+    public function downloadTrainedWeights(int $version): string
     {
+        $url = $this->apiUrl('/'.$this->workspace().'/'.$this->project().'/'.$version.'/ptFile');
+        $response = $this->http()->timeout(60)->get($url);
+        $json = $this->safeJson($response);
+        $weightsUrl = is_string($json['weightsUrl'] ?? null) ? $json['weightsUrl'] : '';
+        if ($weightsUrl !== '') {
+            $file = $this->http()->timeout(180)->get($weightsUrl);
+            if (! $file->successful()) {
+                throw new RuntimeException('Roboflow weight download failed.');
+            }
+
+            return $file->body();
+        }
+        $body = $response->body();
+        if ($response->successful() && strlen($body) > 100000 && ! str_starts_with(ltrim($body), '{')) {
+            return $body;
+        }
+
+        throw new RuntimeException($this->errorMessage(
+            $json,
+            'Roboflow did not return trained weights. The account may not allow a weight download.'
+        ));
+    }
+
+    public function startTraining(int $version, ?string $modelType = null, ?string $speed = null, ?int $epochs = null): void
+    {
+        $this->exportForTraining($version);
         $url = $this->apiUrl('/'.$this->workspace().'/'.$this->project().'/'.$version.'/train', [
             'nocache' => 'true',
         ]);
-        $response = Http::timeout(60)
+        $response = $this->http()->timeout(60)
             ->asJson()
             ->post($url, [
-                'speed' => $this->speed(),
-                'modelType' => $this->modelType(),
+                'speed' => $speed ?: $this->speed(),
+                'modelType' => $modelType ?: $this->modelType(),
+                'epochs' => $epochs ?: $this->epochs(),
             ]);
         if (! $response->successful()) {
             throw new RuntimeException($this->errorMessage($this->safeJson($response), 'Roboflow could not start training. The account plan may not allow API training.'));
         }
+    }
+
+    /**
+     * YOLOv11 Large trains from the yolov5pytorch export of the version.
+     */
+    public function exportForTraining(int $version): void
+    {
+        $url = $this->apiUrl('/'.$this->workspace().'/'.$this->project().'/'.$version.'/yolov5pytorch');
+        $last = [];
+        for ($attempt = 0; $attempt < 8; $attempt++) {
+            $response = $this->http()->timeout(60)->get($url);
+            $last = $this->safeJson($response);
+            $link = $last['export']['link'] ?? $last['link'] ?? null;
+            if ($response->successful() && is_string($link) && $link !== '') {
+                return;
+            }
+            if (! $response->successful() && $response->status() !== 404 && $response->status() !== 202) {
+                throw new RuntimeException($this->errorMessage($last, 'Roboflow could not export this version for training.'));
+            }
+            sleep(5);
+        }
+
+        throw new RuntimeException($this->errorMessage($last, 'Roboflow is still preparing the training export. Try again in a minute.'));
     }
 
     /**
@@ -151,7 +208,7 @@ class RoboflowClient
     public function versionStatus(int $version): array
     {
         $url = $this->apiUrl('/'.$this->workspace().'/'.$this->project().'/'.$version);
-        $response = Http::timeout(30)->get($url);
+        $response = $this->http()->timeout(30)->get($url);
         $json = $this->json($response, 'read training status');
 
         return is_array($json) ? $json : [];
@@ -165,6 +222,13 @@ class RoboflowClient
         }
 
         return str_replace($key, '[redacted]', $text);
+    }
+
+    private function http(): \Illuminate\Http\Client\PendingRequest
+    {
+        return Http::withOptions([
+            'verify' => (bool) config('services.roboflow.verify_ssl', true),
+        ]);
     }
 
     private function apiKey(): string

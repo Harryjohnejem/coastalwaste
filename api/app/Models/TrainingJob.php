@@ -14,7 +14,13 @@ class TrainingJob extends Model
 
     public const CREATING_VERSION = 'creating_version';
 
+    public const READY_TO_PICK = 'ready_to_pick';
+
+    public const READY_TO_TRAIN = 'ready_to_train';
+
     public const TRAINING = 'training';
+
+    public const INSTALLING = 'installing';
 
     public const COMPLETED = 'completed';
 
@@ -28,11 +34,29 @@ class TrainingJob extends Model
 
     public const REJECTED = 'rejected';
 
+    public const DISMISSED = 'dismissed';
+
     public const ACTIVE = [
         self::PREPARING,
         self::UPLOADING,
+        self::READY_TO_PICK,
         self::CREATING_VERSION,
+        self::READY_TO_TRAIN,
         self::TRAINING,
+        self::INSTALLING,
+    ];
+
+    public const RECIPE = [
+        'architecture' => 'yolov11',
+        'architecture_label' => 'YOLOv11',
+        'model_size' => 'large',
+        'model_size_label' => 'Large',
+        'engine' => 'custom',
+        'engine_label' => 'Custom Training',
+        'model_type' => 'yolov11l',
+        'training_speed' => 'fast',
+        'epochs' => 350,
+        'epochs_label' => '350',
     ];
 
     protected $fillable = [
@@ -41,6 +65,7 @@ class TrainingJob extends Model
         'workspace',
         'project',
         'dataset_version',
+        'total_valid_samples',
         'model_type',
         'hosted_model_id',
         'training_speed',
@@ -60,6 +85,7 @@ class TrainingJob extends Model
     protected function casts(): array
     {
         return [
+            'total_valid_samples' => 'integer',
             'manifest' => 'array',
             'preprocessing' => 'array',
             'augmentation' => 'array',
@@ -90,14 +116,18 @@ class TrainingJob extends Model
         return match ($status) {
             self::PREPARING => 'Preparing Dataset',
             self::UPLOADING => 'Uploading Dataset',
+            self::READY_TO_PICK => 'Pick your data',
             self::CREATING_VERSION => 'Creating Version',
+            self::READY_TO_TRAIN => 'Ready to train',
             self::TRAINING => 'Training',
+            self::INSTALLING => 'Installing weights',
             self::COMPLETED => 'Training Completed',
             self::FAILED => 'Training Failed',
             self::AWAITING_EVALUATION => 'Awaiting Evaluation',
             self::APPROVED_FOR_DEPLOYMENT => 'Approved for Deployment',
             self::DEPLOYED => 'Deployed',
             self::REJECTED => 'Rejected',
+            self::DISMISSED => 'Cleared',
             default => $status,
         };
     }
@@ -111,9 +141,17 @@ class TrainingJob extends Model
             'workspace' => $this->workspace,
             'project' => $this->project,
             'dataset_version' => $this->dataset_version,
+            'total_valid_samples' => (int) $this->total_valid_samples,
             'model_type' => $this->model_type,
             'hosted_model_id' => $this->hosted_model_id,
             'training_speed' => $this->training_speed,
+            'epochs' => (int) (is_array($this->manifest) ? ($this->manifest['epochs'] ?? self::RECIPE['epochs']) : self::RECIPE['epochs']),
+            'train_count' => (int) ($this->train_items_count ?? ($this->relationLoaded('items')
+                ? $this->items->where('split', 'train')->count()
+                : $this->items()->where('split', 'train')->count())),
+            'valid_count' => (int) ($this->valid_items_count ?? ($this->relationLoaded('items')
+                ? $this->items->whereIn('split', ['valid', 'val'])->count()
+                : $this->items()->whereIn('split', ['valid', 'val'])->count())),
             'manifest' => $this->manifest,
             'metrics' => $this->metrics,
             'error_message' => $this->error_message,

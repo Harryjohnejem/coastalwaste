@@ -19,6 +19,9 @@ final class DatasetAttribution
 
     public const UNKNOWN = 'unknown';
 
+    /** Saved with the live model's dataset name (see LiveModel). */
+    public const LIVE_MODEL = 'live_model';
+
     /** Model metadata: both subsets trained together. */
     public const TRAINING_COMBINED = 'Combined (Local 1 + Local 2)';
 
@@ -35,10 +38,27 @@ final class DatasetAttribution
         ];
     }
 
+    /**
+     * Live CCTV detection: the dataset and model the cameras use right now.
+     *
+     * @return array{training_dataset: string, training_model: string, dataset_attribution: string}
+     */
+    public static function forLiveModel(): array
+    {
+        $live = LiveModel::current();
+
+        return [
+            'training_dataset' => $live['dataset'],
+            'training_model' => $live['model'],
+            'dataset_attribution' => self::LIVE_MODEL,
+        ];
+    }
+
     public static function normalize(?string $value): string
     {
         $raw = strtolower(trim((string) $value));
         return match ($raw) {
+            self::LIVE_MODEL, 'live model' => self::LIVE_MODEL,
             self::LOCAL_1, 'local 1', 'local1' => self::LOCAL_1,
             self::LOCAL_2, 'local 2', 'local2' => self::LOCAL_2,
             self::COMBINED_NOT_ATTRIBUTABLE,
@@ -57,6 +77,7 @@ final class DatasetAttribution
         return match (self::normalize($value)) {
             self::LOCAL_1 => 'Local 1',
             self::LOCAL_2 => 'Local 2',
+            self::LIVE_MODEL => 'Live model',
             self::COMBINED_NOT_ATTRIBUTABLE => 'Combined Model — Source Not Attributable',
             default => 'Unknown / Not Attributable',
         };
@@ -78,6 +99,7 @@ final class DatasetAttribution
     public static function filterValues(): array
     {
         return [
+            self::LIVE_MODEL,
             self::LOCAL_1,
             self::LOCAL_2,
             self::COMBINED_NOT_ATTRIBUTABLE,

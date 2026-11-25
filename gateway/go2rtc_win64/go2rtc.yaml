@@ -4,9 +4,7 @@ api:
 
 streams:
     cam01: rtsp://${TAPO_RTSP_USER}:${TAPO_RTSP_PASS}@${TAPO_HOST}:554/stream1
-    cam02: rtsp://${TAPO_RTSP_USER}:${TAPO_RTSP_PASS}@${TAPO_HOST}:554/stream6
-    cam03: rtsp://${TAPO2_RTSP_USER}:${TAPO2_RTSP_PASS}@${TAPO2_HOST}:554/stream1
-    cam04: rtsp://${TAPO2_RTSP_USER}:${TAPO2_RTSP_PASS}@${TAPO2_HOST}:554/stream6
+    cam02: rtsp://${TAPO2_RTSP_USER}:${TAPO2_RTSP_PASS}@${TAPO2_HOST}:554/stream1
 
 webrtc:
     listen: ":8560"

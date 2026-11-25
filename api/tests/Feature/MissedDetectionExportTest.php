@@ -6,6 +6,8 @@ use App\Models\Camera;
 use App\Models\Detection;
 use App\Models\MissedDetectionReport;
 use App\Models\User;
+use App\Support\TrainingSamplePlan;
+use App\Support\WasteClassMap;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
@@ -26,6 +28,99 @@ class MissedDetectionExportTest extends TestCase
     {
         parent::setUp();
         Storage::fake('public');
+    }
+
+    public function test_admin_correction_is_separate_from_original_and_counts_only_after_approval(): void
+    {
+        $admin = User::factory()->create(['role' => 'Admin', 'email' => 'admin-correction@example.com']);
+        $staff = User::factory()->create(['role' => 'Staff', 'email' => 'staff-correction@example.com']);
+        $camera = Camera::query()->create([
+            'camera_code' => 'CAM-01',
+            'camera_name' => 'Wide-Angle Lens',
+            'monitoring_location' => 'Paco Beach',
+            'status' => 'Online',
+        ]);
+        $path = 'missed-detections/correction-original.jpg';
+        Storage::disk('public')->put($path, file_get_contents(dirname(__DIR__).'/fixtures/pixel.jpg'));
+        $report = MissedDetectionReport::query()->create([
+            'user_id' => $admin->id,
+            'camera_id' => $camera->id,
+            'description' => 'The model confused a bag with a bottle.',
+            'image_path' => $path,
+            'image_name' => 'correction-original.jpg',
+            'status' => MissedDetectionReport::PENDING,
+            'include_in_export' => false,
+            'original_prediction' => 'Plastic Bag',
+            'original_prediction_confidence' => 0.73,
+            'original_model_boxes' => [[
+                'class_name' => 'Plastic Bag', 'x' => 0.2, 'y' => 0.2, 'width' => 0.3, 'height' => 0.3,
+            ]],
+        ]);
+        $report->annotations()->create([
+            'class_name' => 'Plastic Bag',
+            'class_index' => WasteClassMap::index('Plastic Bag'),
+            'x' => 0.2, 'y' => 0.2, 'width' => 0.3, 'height' => 0.3,
+        ]);
+        $annotations = [[
+            'class_name' => 'Plastic Bottle',
+            'x' => 0.18, 'y' => 0.2, 'width' => 0.34, 'height' => 0.31,
+        ]];
+
+        $this->actingAs($staff)->putJson("/api/missed-detections/{$report->id}/annotations", ['annotations' => $annotations])
+            ->assertForbidden();
+        $corrected = $this->actingAs($admin)->putJson("/api/missed-detections/{$report->id}/annotations", ['annotations' => $annotations])
+            ->assertOk()
+            ->assertJsonPath('status', MissedDetectionReport::CORRECTED)
+            ->assertJsonPath('original_prediction', 'Plastic Bag')
+            ->assertJsonPath('annotations.0.class_name', 'Plastic Bottle')
+            ->assertJsonPath('include_in_export', false);
+
+        $this->assertSame($admin->id, $corrected->json('corrected_by'));
+        $this->assertNotNull($corrected->json('corrected_at'));
+        $this->assertNull($corrected->json('approved_at'));
+        $beforeApproval = TrainingSamplePlan::summary();
+        $this->assertSame(0, collect($beforeApproval['classes'])->firstWhere('name', 'Plastic Bottle')['eligible']);
+
+        $this->actingAs($admin)->postJson("/api/missed-detections/{$report->id}/review", [
+            'decision' => 'approved',
+            'include_in_export' => true,
+        ])->assertOk()->assertJsonPath('status', MissedDetectionReport::APPROVED)
+            ->assertJsonPath('approved_by', $admin->id);
+        $afterApproval = TrainingSamplePlan::summary();
+        $this->assertSame(1, collect($afterApproval['classes'])->firstWhere('name', 'Plastic Bottle')['eligible']);
+        $this->assertSame(0, collect($afterApproval['classes'])->firstWhere('name', 'Plastic Bag')['eligible']);
+        $this->actingAs($admin)->postJson("/api/missed-detections/{$report->id}/review", [
+            'decision' => 'corrected',
+        ])->assertOk()->assertJsonPath('status', MissedDetectionReport::CORRECTED)
+            ->assertJsonPath('include_in_export', false)
+            ->assertJsonPath('approved_at', null);
+        $this->assertSame(0, collect(TrainingSamplePlan::summary()['classes'])->firstWhere('name', 'Plastic Bottle')['eligible']);
+        $this->actingAs($admin)->postJson("/api/missed-detections/{$report->id}/review", [
+            'decision' => 'approved',
+            'include_in_export' => true,
+        ])->assertOk();
+
+        $rejectedPath = 'missed-detections/rejected-distinct.jpg';
+        Storage::disk('public')->put($rejectedPath, file_get_contents(dirname(__DIR__).'/fixtures/pixel.jpg').'rejected-distinct');
+        $rejected = MissedDetectionReport::query()->create([
+            'user_id' => $admin->id,
+            'camera_id' => $camera->id,
+            'description' => 'Rejected bottle review.',
+            'image_path' => $rejectedPath,
+            'image_name' => 'rejected-distinct.jpg',
+            'status' => MissedDetectionReport::PENDING,
+            'include_in_export' => false,
+        ]);
+        $rejected->annotations()->create([
+            'class_name' => 'Plastic Bottle',
+            'class_index' => WasteClassMap::index('Plastic Bottle'),
+            'x' => 0.2, 'y' => 0.2, 'width' => 0.3, 'height' => 0.3,
+        ]);
+        $this->actingAs($admin)->postJson("/api/missed-detections/{$rejected->id}/review", [
+            'decision' => 'rejected',
+        ])->assertOk()->assertJsonPath('status', MissedDetectionReport::REJECTED);
+        $afterReject = TrainingSamplePlan::summary();
+        $this->assertSame(1, collect($afterReject['classes'])->firstWhere('name', 'Plastic Bottle')['eligible']);
     }
 
     public function test_only_verified_annotations_are_exported_as_yolo(): void
@@ -55,12 +150,12 @@ class MissedDetectionExportTest extends TestCase
         $verifiedId = $verified->json('id');
 
         $this->actingAs($staff)->postJson("/api/missed-detections/{$verifiedId}/review", [
-            'decision' => 'verified',
+            'decision' => 'corrected',
         ])->assertForbidden();
 
         $this->actingAs($admin)->postJson("/api/missed-detections/{$verifiedId}/review", [
             'decision' => 'verified',
-        ])->assertOk()->assertJsonPath('status', MissedDetectionReport::VERIFIED);
+        ])->assertOk()->assertJsonPath('status', MissedDetectionReport::CORRECTED);
 
         $this->actingAs($admin)->getJson('/api/missed-detections/export')
             ->assertStatus(422)
@@ -145,9 +240,9 @@ class MissedDetectionExportTest extends TestCase
         $this->assertSame(0, Detection::query()->count());
 
         $this->assertSame("0 0.250000 0.400000 0.300000 0.400000\n", $label);
-        $this->assertStringContainsString('7: Plastic Bottle', $yaml);
-        $this->assertStringContainsString('12: Styrofoam', $yaml);
-        $this->assertStringNotContainsString('Plastic Bag', $yaml);
+        $this->assertStringContainsString('7: Plastic Bag', $yaml);
+        $this->assertStringContainsString('8: Plastic Bottle', $yaml);
+        $this->assertStringContainsString('14: Styrofoam', $yaml);
         $this->assertSame(
             MissedDetectionReport::EXPORTED,
             MissedDetectionReport::query()->find($verifiedId)->status,
@@ -157,7 +252,7 @@ class MissedDetectionExportTest extends TestCase
             MissedDetectionReport::query()->find($pending->json('id'))->status,
         );
         $this->assertSame(
-            MissedDetectionReport::VERIFIED,
+            MissedDetectionReport::CORRECTED,
             MissedDetectionReport::query()->find($heldId)->status,
         );
         $this->assertSame($camera->camera_code, $verified->json('camera_id'));
@@ -300,6 +395,60 @@ class MissedDetectionExportTest extends TestCase
             MissedDetectionReport::APPROVED,
             MissedDetectionReport::query()->find($id)->status,
         );
+    }
+
+    public function test_admin_can_delete_approved_reviews_unless_a_running_job_uses_them(): void
+    {
+        Storage::fake('public');
+        $admin = User::factory()->create(['role' => 'Admin', 'email' => 'admin-delete@example.com']);
+        $camera = Camera::query()->create([
+            'camera_code' => 'CAM-01',
+            'camera_name' => 'Wide-Angle Lens',
+            'monitoring_location' => 'Paco Beach',
+            'status' => 'Online',
+        ]);
+        $make = function (string $status, string $name) use ($admin, $camera) {
+            $path = 'missed-detections/'.$name.'.jpg';
+            Storage::disk('public')->put($path, file_get_contents(dirname(__DIR__).'/fixtures/pixel.jpg'));
+
+            return MissedDetectionReport::query()->create([
+                'user_id' => $admin->id,
+                'camera_id' => $camera->id,
+                'description' => 'Delete test.',
+                'image_path' => $path,
+                'image_name' => $name.'.jpg',
+                'status' => $status,
+                'include_in_export' => true,
+            ]);
+        };
+        $approved = $make(MissedDetectionReport::APPROVED, 'approved');
+        $exported = $make(MissedDetectionReport::EXPORTED, 'exported');
+        $busy = $make(MissedDetectionReport::APPROVED, 'busy');
+        $job = \App\Models\TrainingJob::query()->create([
+            'started_by' => $admin->id,
+            'status' => \App\Models\TrainingJob::TRAINING,
+            'workspace' => 'test-workspace',
+            'project' => 'test-project',
+            'started_at' => now(),
+        ]);
+        \App\Models\TrainingJobItem::query()->create([
+            'training_job_id' => $job->id,
+            'report_id' => $busy->id,
+            'image_hash' => str_repeat('a', 40),
+            'filename' => 'busy.jpg',
+        ]);
+
+        $this->actingAs($admin)
+            ->postJson('/api/missed-detections/bulk-delete', ['ids' => [$approved->id, $exported->id, $busy->id]])
+            ->assertOk()
+            ->assertJsonPath('kept', [$busy->id]);
+
+        $this->assertNull(MissedDetectionReport::query()->find($approved->id));
+        $this->assertNull(MissedDetectionReport::query()->find($exported->id));
+        $this->assertNotNull(MissedDetectionReport::query()->find($busy->id));
+        Storage::disk('public')->assertMissing('missed-detections/approved.jpg');
+
+        $this->actingAs($admin)->deleteJson("/api/missed-detections/{$busy->id}")->assertStatus(422);
     }
 }
 

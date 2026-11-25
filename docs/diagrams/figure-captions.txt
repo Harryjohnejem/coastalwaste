@@ -1,6 +1,6 @@
 Figure captions (paste under diagrams in the manuscript)
 
-Figure X. Logical Entity-Relationship Diagram of the Computer Vision-Based Coastal Waste Monitoring and Reporting System. The schema is normalized to 3NF. Detection snapshots are stored in detection_images. Waste quota compares accumulated detections to a configured limit by period (daily, weekly, or monthly) and stores the cleanup recommendation. Detection confidence threshold is stored in system_settings, not as a separate threshold table. Report CSV/PDF export is performed in the web dashboard and is not persisted as an export_history table. Laravel support tables (cache, sessions, personal_access_tokens) are omitted.
+Figure X. Logical Entity-Relationship Diagram of the Computer Vision-Based Coastal Waste Monitoring and Reporting System. The schema is normalized to 3NF. Detection snapshots are stored in detection_images. The cleanup threshold (waste limit per camera and warning level) is stored in system_settings and compared with the waste each camera shows on the live stream, so it has no table of its own. Detection confidence threshold is stored in system_settings, not as a separate threshold table. Report CSV/PDF export is performed in the web dashboard and is not persisted as an export_history table. Laravel support tables (cache, sessions, personal_access_tokens) are omitted.
 
 Figure Y. Class Diagram of the implemented system modules. Associations follow the Laravel Eloquent models used by the REST API and React dashboard.
 

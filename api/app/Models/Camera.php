@@ -15,6 +15,9 @@ class Camera extends Model
         'status',
         'last_seen',
         'stream_url',
+        'go2rtc_src',
+        'rtsp_port',
+        'rtsp_path',
         'protocol',
         'transport',
         'username',
@@ -35,6 +38,8 @@ class Camera extends Model
             'last_seen' => 'datetime',
             'detection_enabled' => 'boolean',
             'in_grid' => 'boolean',
+            'password' => 'encrypted',
+            'rtsp_port' => 'integer',
         ];
     }
 
@@ -74,6 +79,11 @@ class Camera extends Model
             'detection' => $this->detection_enabled,
             'inGrid' => $this->in_grid,
             'ip_address' => $this->ip_address,
+            'rtsp_port' => $this->rtsp_port,
+            'rtsp_path' => $this->rtsp_path,
+            // Added from the dashboard by IP address; its gateway stream is managed here.
+            'managed' => filled($this->go2rtc_src),
+            'has_password' => filled($this->getRawOriginal('password')),
             'last_seen' => $this->last_seen?->toIso8601String(),
         ];
     }
